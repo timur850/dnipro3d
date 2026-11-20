@@ -85,6 +85,7 @@ window.addEventListener('error',function(e){showErr('ERR: '+(e.message||'?')+(e.
 window.addEventListener('unhandledrejection',function(e){showErr('PROMISE: '+(e.reason&&e.reason.message||e.reason));});
 </script>
 <script crossorigin="anonymous" src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script crossorigin="anonymous" src="https://unpkg.com/three@0.152.2/build/three.min.js"></script>
 <script>
 if(typeof maplibregl==='undefined'){showErr('MapLibre не завантажився (unpkg.com заблоковано або немає інтернету). Файл треба відкривати у звичайному браузері, не в прев’ю.');}
 else if(!maplibregl.supported()){showErr('WebGL недоступний у цьому браузері/прев’ю. Відкрий у Chrome/Safari.');}
@@ -182,16 +183,11 @@ function applyLook(){
       s('building','fill-extrusion-color',['case',['<',['%',['*',hh,13.37],1],.4],lit,base]);
     }else s('building','fill-extrusion-color',base);
   }
-  {
-    let ca=mix([14,40,26],[62,138,62],k),cb=mix([10,32,22],[44,112,52],k);
-    if(w==='snow'){ca=mix(ca,[232,240,247],.65);cb=mix(cb,[220,232,242],.65);}
-    else if(w!=='clear'){ca=mix(ca,hex(GRAY),.2);cb=mix(cb,hex(GRAY),.2);}
-    s('trees','fill-extrusion-color',['case',['==',['get','part'],'trunk'],css(mix([30,22,16],[104,76,50],k)),['>',['get','tone'],.5],css(ca),css(cb)]);
-  }
   const az=(h>=6&&h<=18)?90+180*((h-6)/12):200;
   const polar=90-62*sun;
   const lc=k>.5?(w==='clear'?'#fff3da':'#e6ebf5'):'#7b8cc8';
   map.setLight({anchor:'map',color:lc,intensity:.18+.34*k*(w==='clear'?1:.7),position:[1.15,az,clamp(polar,25,85)]});
+  if(typeof setLive==='function')setLive(k,w,az,clamp(polar,25,85));
 }
 map.on('load',()=>{applyLook();seedFx();resolveAll();checkVisit();});
 
@@ -349,20 +345,121 @@ function checkVisit(){
 map.on('moveend',checkVisit);
 render();
 
-/* ---------- живе місто: дерева і машини ---------- */
+/* ---------- живе місто: справжні 3D-моделі (three.js) ---------- */
+const ORIGIN=[35.0462,48.4647];
 const M_LAT=111320;
 const mLon=lat=>M_LAT*Math.cos(lat*Math.PI/180);
-const EMPTY={type:'FeatureCollection',features:[]};
-const treeCache=new Map();
-let roads=[],cars=[];
-const endIdx=new Map();
+const KX0=mLon(ORIGIN[1]);
+const toLocal=(lon,lat)=>[(lon-ORIGIN[0])*KX0,(lat-ORIGIN[1])*M_LAT];
 const hsh=(a,b)=>{const q=Math.sin(a*127.1+b*311.7)*43758.5453;return q-Math.floor(q)};
 const pkey=p=>p[0].toFixed(5)+','+p[1].toFixed(5);
+const LOOK={k:1,w:'clear',az:150,polar:40};
+const L={ready:false,trees:[],veh:[],lamps:[],snow:false};
+const treeCache=new Map(),lampCache=new Map();
+let carRoads=[],tramRoads=[];
 
-function circle(c,r,n){
-  const kx=mLon(c[1]),ring=[];
-  for(let i=0;i<n;i++){const a=i/n*Math.PI*2+.4;ring.push([c[0]+Math.cos(a)*r/kx,c[1]+Math.sin(a)*r/M_LAT]);}
-  ring.push(ring[0]);return ring;
+function setLive(k,w,az,polar){LOOK.k=k;LOOK.w=w;LOOK.az=az;LOOK.polar=polar;if(L.ready)applyLive();}
+
+/* --- геометрія --- */
+function profileGeom(pts,width){
+  const sh=new THREE.Shape();
+  pts.forEach((p,i)=>i?sh.lineTo(p[0],p[1]):sh.moveTo(p[0],p[1]));
+  const g=new THREE.ExtrudeGeometry(sh,{depth:width,bevelEnabled:false});
+  g.translate(0,0,-width/2);g.rotateX(Math.PI/2);return g;
+}
+function mkInst(geom,mat,max,colored){
+  const m=new THREE.InstancedMesh(geom,mat,max);
+  m.frustumCulled=false;m.count=0;
+  m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  if(colored){const w=new THREE.Color(1,1,1);for(let i=0;i<max;i++)m.setColorAt(i,w);m.instanceColor.setUsage(THREE.DynamicDrawUsage);}
+  L.scene.add(m);return m;
+}
+function buildModels(){
+  const std=(c,o)=>new THREE.MeshStandardMaterial(Object.assign({color:c,roughness:.6,metalness:.15,flatShading:true,side:THREE.DoubleSide},o||{}));
+  const basic=c=>new THREE.MeshBasicMaterial({color:c});
+  // легковик
+  L.carBody=mkInst(profileGeom([[-2.2,.25],[2.2,.25],[2.26,.55],[2.0,.8],[1.0,.93],[-1.5,.93],[-2.2,.9],[-2.27,.55]],1.8),std(0xffffff,{metalness:.35,roughness:.4}),200,true);
+  L.carCabin=mkInst(profileGeom([[1.0,.9],[.38,1.46],[-.9,1.46],[-1.55,.9]],1.6),std(0x1b2433,{metalness:.6,roughness:.15}),200,false);
+  L.carRoof=mkInst(new THREE.BoxGeometry(1.3,1.62,.06).translate(-.26,0,1.49),std(0xffffff,{metalness:.35,roughness:.4}),200,true);
+  // колеса, фари
+  L.wheels=mkInst(new THREE.CylinderGeometry(.33,.33,.24,14),std(0x111111,{roughness:.9,metalness:0}),900,false);
+  L.head=mkInst(new THREE.BoxGeometry(.06,.3,.14),basic(0xfff2b8),500,false);
+  L.tail=mkInst(new THREE.BoxGeometry(.06,.3,.14),basic(0xff2a2a),500,false);
+  // автобуси / трамваї (боксові)
+  const unit=new THREE.BoxGeometry(1,1,1).translate(0,0,.5);
+  L.boxBody=mkInst(unit,std(0xffffff,{metalness:.25,roughness:.45}),40,true);
+  L.boxRoof=mkInst(unit,std(0xcfd4da),40,false);
+  L.boxWin=mkInst(unit,std(0x1b2433,{metalness:.6,roughness:.15}),140,false);
+  // дерева
+  L.trunk=mkInst(new THREE.CylinderGeometry(.22,.34,4,6).rotateX(Math.PI/2).translate(0,0,2),std(0x5d4330,{roughness:1,metalness:0}),3600,false);
+  L.crown=mkInst(new THREE.IcosahedronGeometry(1,1),std(0xffffff,{roughness:.95,metalness:0}),7200,true);
+  L.cone=mkInst(new THREE.ConeGeometry(1,1,7).rotateX(Math.PI/2).translate(0,0,.5),std(0xffffff,{roughness:.95,metalness:0}),3800,true);
+  // ліхтарі
+  L.pole=mkInst(new THREE.CylinderGeometry(.07,.1,7,6).rotateX(Math.PI/2).translate(0,0,3.5),std(0x5b6270),900,false);
+  L.lampHead=mkInst(new THREE.SphereGeometry(.38,8,6).translate(0,0,7.1),basic(0x9aa0a8),900,false);
+  // світло
+  L.amb=new THREE.AmbientLight(0xffffff,.6);
+  L.hemi=new THREE.HemisphereLight(0xbfd8ff,0x556644,.5);
+  L.sun=new THREE.DirectionalLight(0xfff3da,1);
+  L.scene.add(L.amb,L.hemi,L.sun);
+  makeBuildingMeshes();
+}
+
+/* --- допоміжні матриці --- */
+const _P=new THREE.Vector3(),_Q=new THREE.Quaternion(),_S=new THREE.Vector3(),_Z=new THREE.Vector3(0,0,1);
+const _B=new THREE.Matrix4(),_M=new THREE.Matrix4(),_T=new THREE.Matrix4(),_C=new THREE.Color();
+const Q0=new THREE.Quaternion();
+function child(out,base,ox,oy,oz,sx,sy,sz){
+  _T.compose(_P.set(ox,oy,oz),Q0,_S.set(sx,sy,sz));
+  return out.multiplyMatrices(base,_T);
+}
+
+/* --- світло / час доби --- */
+function applyLive(){
+  const {k,w,az,polar}=LOOK;
+  const a=az*Math.PI/180,p=polar*Math.PI/180;
+  L.sun.position.set(Math.sin(a)*Math.sin(p),Math.cos(a)*Math.sin(p),Math.cos(p)).multiplyScalar(100);
+  const cf=w==='clear'?1:.55;
+  L.sun.intensity=.1+1.25*k*cf;
+  L.sun.color.set(k>.5?0xfff1d6:0x7f93d6);
+  L.amb.intensity=.3+.35*k;
+  L.hemi.intensity=.18+.42*k;
+  L.lampHead.material.color.set((1-k)>.35?0xffd98a:0x9aa0a8);
+  if(L.mWallA){const e=Math.max(0,1-k)*1.3;L.mWallA.emissiveIntensity=e;L.mWallG.emissiveIntensity=e*.8;}
+  const snow=w==='snow';
+  if(snow!==L.snow){L.snow=snow;writeTrees();}
+}
+
+/* --- дерева --- */
+function writeTrees(){
+  if(!L.ready)return;
+  let nt=0,nc=0,nk=0;
+  const sn=L.snow?.7:0;
+  for(const t of L.trees){
+    if(nt>=3500)break;
+    const [x,y]=toLocal(t.lon,t.lat),H=t.h,r=t.r;
+    _B.compose(_P.set(x,y,0),Q0,_S.set(r/3.5,r/3.5,H/10));
+    L.trunk.setMatrixAt(nt++,_B);
+    if(t.con){
+      _C.setRGB(.08+.05*t.tone,.28+.1*t.tone,.16+.05*t.tone).lerp(new THREE.Color(.93,.96,.98),sn);
+      for(let j=0;j<3&&nk<3800;j++){
+        const rad=r*(1.15-.32*j),hh=H*.36;
+        _B.compose(_P.set(x,y,H*(.26+.22*j)),Q0,_S.set(rad,rad,hh));
+        L.cone.setMatrixAt(nk,_B);L.cone.setColorAt(nk,_C);nk++;
+      }
+    }else{
+      _C.setRGB(.16+.14*t.tone,.42+.13*t.tone,.17+.03*t.tone).lerp(new THREE.Color(.93,.96,.98),sn);
+      if(nc<7198){
+        _B.compose(_P.set(x,y,H*.6),Q0,_S.set(r,r,r*.85));
+        L.crown.setMatrixAt(nc,_B);L.crown.setColorAt(nc,_C);nc++;
+        _B.compose(_P.set(x+r*.35,y+r*.2,H*.6+r*.7),Q0,_S.set(r*.62,r*.62,r*.55));
+        L.crown.setMatrixAt(nc,_B);L.crown.setColorAt(nc,_C);nc++;
+      }
+    }
+  }
+  L.trunk.count=nt;L.crown.count=nc;L.cone.count=nk;
+  L.trunk.instanceMatrix.needsUpdate=L.crown.instanceMatrix.needsUpdate=L.cone.instanceMatrix.needsUpdate=true;
+  L.crown.instanceColor.needsUpdate=L.cone.instanceColor.needsUpdate=true;
 }
 function inRing(x,y,ring){
   let ins=false;
@@ -377,18 +474,16 @@ function inPoly(x,y,rings){
   for(let i=1;i<rings.length;i++)if(inRing(x,y,rings[i]))return false;
   return true;
 }
-const poly=(ring,props)=>({type:'Feature',properties:props,geometry:{type:'Polygon',coordinates:[ring]}});
-
 function buildTrees(){
-  if(!map.getSource('trees')||map.getZoom()<15.8)return;
+  if(!L.ready||map.getZoom()<15.5)return;
   const b=map.getBounds().toArray(),pad=.0015;
   const W0=b[0][0]-pad,S0=b[0][1]-pad,E0=b[1][0]+pad,N0=b[1][1]+pad;
   const feats=[].concat(
     map.querySourceFeatures(SRC,{sourceLayer:'park'}),
     map.querySourceFeatures(SRC,{sourceLayer:'landcover',filter:['==',['get','class'],'wood']})
   );
-  const lat0=(S0+N0)/2,sx=15/mLon(lat0),sy=15/M_LAT;
-  if(treeCache.size>6000)treeCache.clear();
+  const lat0=(S0+N0)/2,sx=14/mLon(lat0),sy=14/M_LAT;
+  if(treeCache.size>8000)treeCache.clear();
   for(const f of feats){
     const g=f.geometry;if(!g)continue;
     const polys=g.type==='Polygon'?[g.coordinates]:(g.type==='MultiPolygon'?g.coordinates:[]);
@@ -400,34 +495,27 @@ function buildTrees(){
       for(let ix=Math.floor(x0/sx);ix<=Math.ceil(x1/sx);ix++)for(let iy=Math.floor(y0/sy);iy<=Math.ceil(y1/sy);iy++){
         const key=ix+'_'+iy;
         if(treeCache.has(key))continue;
-        const r1=hsh(ix,iy);
-        if(r1>.62)continue;
+        if(hsh(ix,iy)>.6)continue;
         const x=(ix+hsh(iy,ix+7))*sx,y=(iy+hsh(ix+3,iy+11))*sy;
         if(!inPoly(x,y,rings))continue;
-        const c=[x,y],r=2.6+hsh(ix+5,iy+9)*2.6,tone=hsh(ix+1,iy+2),th=7+hsh(ix+9,iy+4)*6;
-        treeCache.set(key,{c,f:[
-          poly(circle(c,.45,4),{part:'trunk',base:0,h:3.2,tone}),
-          poly(circle(c,r,8),{part:'crown',base:2.6,h:2.6+th*.62,tone}),
-          poly(circle(c,r*.6,8),{part:'crown',base:2.6+th*.55,h:2.6+th,tone})
-        ]});
+        const con=hsh(ix+13,iy+5)<.22;
+        treeCache.set(key,{lon:x,lat:y,con,tone:hsh(ix+1,iy+2),
+          r:con?1.9+hsh(ix+5,iy+9)*1.3:3+hsh(ix+5,iy+9)*1.8,
+          h:con?9+hsh(ix+9,iy+4)*5:8+hsh(ix+9,iy+4)*5});
       }
     }
   }
   const out=[];
-  for(const v of treeCache.values()){
-    if(v.c[0]<W0||v.c[0]>E0||v.c[1]<S0||v.c[1]>N0)continue;
-    for(const f of v.f)out.push(f);
+  for(const t of treeCache.values()){
+    if(t.lon<W0||t.lon>E0||t.lat<S0||t.lat>N0)continue;
+    out.push(t);if(out.length>=3500)break;
   }
-  map.getSource('trees').setData({type:'FeatureCollection',features:out});
+  L.trees=out;writeTrees();
 }
 
-/* ---- машини ---- */
-function buildRoads(){
-  if(!map.getSource('cars')||map.getZoom()<15.5)return;
-  const fs=map.querySourceFeatures(SRC,{sourceLayer:'transportation',
-    filter:['all',['in',['get','class'],['literal',['trunk','primary','secondary','tertiary','minor']]],['!=',['get','brunnel'],'tunnel']]});
+/* --- дороги, транспорт, ліхтарі --- */
+function collect(fs,idx){
   const seen=new Set(),list=[];
-  endIdx.clear();
   for(const f of fs){
     const g=f.geometry;if(!g)continue;
     const lines=g.type==='LineString'?[g.coordinates]:(g.type==='MultiLineString'?g.coordinates:[]);
@@ -442,92 +530,313 @@ function buildRoads(){
       if(len<10)continue;
       const id=pkey(pts[0])+'|'+pkey(pts[pts.length-1])+'|'+len.toFixed(0);
       if(seen.has(id))continue;seen.add(id);
-      const road={pts,cum,len,cls:f.properties.class};
+      const road={pts,cum,len,cls:f.properties.class,idx};
       list.push(road);
       for(const [p,atStart] of [[pts[0],true],[pts[pts.length-1],false]]){
-        const k=pkey(p);if(!endIdx.has(k))endIdx.set(k,[]);
-        endIdx.get(k).push({road,atStart});
+        const k=pkey(p);if(!idx.has(k))idx.set(k,[]);
+        idx.get(k).push({road,atStart});
       }
     }
   }
-  roads=list;
-  const b=map.getBounds().toArray(),pad=.002;
-  const inView=p=>p[0]>b[0][0]-pad&&p[0]<b[1][0]+pad&&p[1]>b[0][1]-pad&&p[1]<b[1][1]+pad;
-  cars=cars.filter(c=>{const p=posAt(c);return inView([p.lon,p.lat]);});
-  const cand=roads.filter(r=>inView(r.pts[Math.floor(r.pts.length/2)]));
-  const target=Math.min(170,Math.round(cand.length*.7));
-  const COLS=['#e63946','#f4a261','#2a9d8f','#e9ecef','#264653','#ffd166','#4361ee','#adb5bd','#111827','#8ecae6'];
-  while(cars.length<target&&cand.length){
-    const r=cand[Math.floor(Math.random()*cand.length)];
-    cars.push({road:r,d:Math.random()*r.len,dir:Math.random()<.5?1:-1,
-      v:(r.cls==='minor'?6:10)+Math.random()*5,col:COLS[Math.floor(Math.random()*COLS.length)]});
-  }
+  return list;
 }
-function posAt(car){
-  const r=car.road,d=car.d;
+function sample(r,d){
   let i=1;while(i<r.cum.length-1&&r.cum[i]<d)i++;
   const d0=r.cum[i-1],d1=r.cum[i],t=Math.max(0,Math.min(1,(d-d0)/((d1-d0)||1)));
   const a=r.pts[i-1],bb=r.pts[i];
   const lat=a[1]+(bb[1]-a[1])*t,lon=a[0]+(bb[0]-a[0])*t,kx=mLon(lat);
   let hx=(bb[0]-a[0])*kx,hy=(bb[1]-a[1])*M_LAT;
-  if(car.dir<0){hx=-hx;hy=-hy;}
-  const hl=Math.hypot(hx,hy)||1;hx/=hl;hy/=hl;
-  const off=1.8;
-  return {lon:lon+hy*off/kx,lat:lat-hx*off/M_LAT,hx,hy};
+  const hl=Math.hypot(hx,hy)||1;
+  return {lon,lat,hx:hx/hl,hy:hy/hl,kx};
 }
-function step(car,dt){
-  car.d+=car.dir*car.v*dt;
-  const r=car.road;
-  if(car.d>=r.len||car.d<=0){
-    const atEnd=car.d>=r.len,p=atEnd?r.pts[r.pts.length-1]:r.pts[0];
-    const opts=(endIdx.get(pkey(p))||[]).filter(o=>o.road!==r);
+function posAt(v){
+  const s=sample(v.road,v.d);
+  let hx=s.hx,hy=s.hy;if(v.dir<0){hx=-hx;hy=-hy;}
+  const off=v.type==='tram'?0:(v.type==='bus'?2.1:1.8);
+  return {lon:s.lon+hy*off/s.kx,lat:s.lat-hx*off/M_LAT,hx,hy};
+}
+function step(v,dt){
+  v.d+=v.dir*v.v*dt;
+  const r=v.road;
+  if(v.d>=r.len||v.d<=0){
+    const atEnd=v.d>=r.len,p=atEnd?r.pts[r.pts.length-1]:r.pts[0];
+    const opts=(r.idx.get(pkey(p))||[]).filter(o=>o.road!==r);
     if(opts.length){
       const o=opts[Math.floor(Math.random()*opts.length)];
-      car.road=o.road;car.d=o.atStart?0:o.road.len;car.dir=o.atStart?1:-1;
-    }else{car.dir*=-1;car.d=Math.max(0,Math.min(r.len,car.d));}
+      v.road=o.road;v.d=o.atStart?0:o.road.len;v.dir=o.atStart?1:-1;
+    }else{v.dir*=-1;v.d=Math.max(0,Math.min(r.len,v.d));}
   }
 }
-function box(lon,lat,hx,hy,a0,a1,b0,b1){ // a: вздовж, b: впоперек (м)
-  const kx=mLon(lat),ring=[];
-  for(const [a,b] of [[a1,b1],[a1,b0],[a0,b0],[a0,b1],[a1,b1]]){
-    ring.push([lon+(hx*a-hy*b)/kx,lat+(hy*a+hx*b)/M_LAT]);
+function buildRoads(){
+  if(!L.ready||map.getZoom()<15.5)return;
+  const fs=map.querySourceFeatures(SRC,{sourceLayer:'transportation',
+    filter:['all',['in',['get','class'],['literal',['trunk','primary','secondary','tertiary','minor']]],['!=',['get','brunnel'],'tunnel']]});
+  const tfs=map.querySourceFeatures(SRC,{sourceLayer:'transportation',filter:['in','subclass','tram','light_rail']});
+  carRoads=collect(fs,new Map());
+  tramRoads=collect(tfs,new Map());
+  const b=map.getBounds().toArray(),pad=.002;
+  const inView=p=>p[0]>b[0][0]-pad&&p[0]<b[1][0]+pad&&p[1]>b[0][1]-pad&&p[1]<b[1][1]+pad;
+  const mid=r=>r.pts[Math.floor(r.pts.length/2)];
+  L.veh=L.veh.filter(v=>{const p=posAt(v);return inView([p.lon,p.lat]);});
+  const cnt=t=>L.veh.reduce((n,v)=>n+(v.type===t?1:0),0);
+  const candC=carRoads.filter(r=>inView(mid(r)));
+  const candB=candC.filter(r=>r.cls!=='minor'&&r.len>40);
+  const candT=tramRoads.filter(r=>inView(mid(r)));
+  const COLS=[0xe63946,0xf4a261,0x2a9d8f,0xe9ecef,0x264653,0xffd166,0x4361ee,0xadb5bd,0x1f2937,0x8ecae6,0x9d4edd];
+  const BUS=[0xf4c20d,0x2b6cb0];
+  const spawn=(type,list,n,speed,cols)=>{
+    let c=cnt(type);
+    while(c<n&&list.length){
+      const r=list[Math.floor(Math.random()*list.length)];
+      L.veh.push({type,road:r,d:Math.random()*r.len,dir:Math.random()<.5?1:-1,v:speed(r),
+        col:new THREE.Color(cols[Math.floor(Math.random()*cols.length)])});
+      c++;
+    }
+  };
+  spawn('car',candC,Math.min(140,Math.round(candC.length*.7)),r=>(r.cls==='minor'?6:9)+Math.random()*5,COLS);
+  spawn('bus',candB,Math.min(10,Math.round(candB.length*.25)),()=>8+Math.random()*3,BUS);
+  spawn('tram',candT,Math.min(6,candT.length),()=>7+Math.random()*3,[0xd62828]);
+  // ліхтарі вздовж великих доріг
+  for(const r of carRoads){
+    if(r.cls==='minor'||!inView(mid(r)))continue;
+    for(let d=8;d<r.len;d+=42){
+      const sa=sample(r,d);
+      const side=((Math.round(d/42)+Math.round(r.len))&1)?1:-1;
+      const lon=sa.lon+sa.hy*7*side/sa.kx,lat=sa.lat-sa.hx*7*side/M_LAT;
+      const key=Math.round(lon*9000)+'_'+Math.round(lat*13500);
+      if(!lampCache.has(key))lampCache.set(key,[lon,lat]);
+    }
   }
-  return ring;
+  if(lampCache.size>4000)lampCache.clear();
+  const lamps=[];
+  for(const p of lampCache.values()){if(inView(p)){lamps.push(p);if(lamps.length>=880)break;}}
+  L.lamps=lamps;writeLamps();
 }
-function carFeatures(){
-  const out=[];
-  for(const c of cars){
-    const p=posAt(c);
-    out.push(poly(box(p.lon,p.lat,p.hx,p.hy,-2.1,2.1,-.95,.95),{base:.3,h:1.35,col:c.col}));
-    out.push(poly(box(p.lon,p.lat,p.hx,p.hy,-1.0,.9,-.8,.8),{base:1.35,h:2.0,col:'#1b2433'}));
-    out.push(poly(box(p.lon,p.lat,p.hx,p.hy,2.05,2.2,-.8,.8),{base:.55,h:.95,col:'#fff1b0'}));
+function writeLamps(){
+  let n=0;
+  for(const p of L.lamps){
+    const [x,y]=toLocal(p[0],p[1]);
+    _B.compose(_P.set(x,y,0),Q0,_S.set(1,1,1));
+    L.pole.setMatrixAt(n,_B);L.lampHead.setMatrixAt(n,_B);n++;
+  }
+  L.pole.count=L.lampHead.count=n;
+  L.pole.instanceMatrix.needsUpdate=L.lampHead.instanceMatrix.needsUpdate=true;
+}
+
+/* --- кадр анімації --- */
+function updateVehicles(dt){
+  let nc=0,nh=0,nw=0,nb=0,nwin=0;
+  for(const v of L.veh){
+    step(v,dt);
+    const p=posAt(v),[x,y]=toLocal(p.lon,p.lat);
+    _B.compose(_P.set(x,y,0),_Q.setFromAxisAngle(_Z,Math.atan2(p.hy,p.hx)),_S.set(1,1,1));
+    if(v.type==='car'){
+      if(nc>=200)continue;
+      L.carBody.setMatrixAt(nc,_B);L.carBody.setColorAt(nc,v.col);
+      L.carRoof.setMatrixAt(nc,_B);L.carRoof.setColorAt(nc,v.col);
+      L.carCabin.setMatrixAt(nc,_B);nc++;
+      for(const sy of [-1,1]){
+        L.head.setMatrixAt(nh,child(_M,_B,2.25,sy*.62,.62,1,1,1));
+        L.tail.setMatrixAt(nh,child(_M,_B,-2.27,sy*.68,.72,1,1,1));nh++;
+      }
+      for(const wx of [1.35,-1.3])for(const wy of [-.84,.84])
+        L.wheels.setMatrixAt(nw++,child(_M,_B,wx,wy,.33,1,1,1));
+    }else if(v.type==='bus'){
+      L.boxBody.setMatrixAt(nb,child(_M,_B,0,0,.5,11.6,2.5,2.4));L.boxBody.setColorAt(nb,v.col);
+      L.boxRoof.setMatrixAt(nb,child(_M,_B,0,0,2.9,11.4,2.3,.12));nb++;
+      L.boxWin.setMatrixAt(nwin++,child(_M,_B,0,0,1.55,11.66,2.54,.85));
+      for(const wx of [3.4,-3.2])for(const wy of [-1.1,1.1])
+        L.wheels.setMatrixAt(nw++,child(_M,_B,wx,wy,.48,1.45,1.45,1.45));
+      for(const sy of [-1,1])L.head.setMatrixAt(nh,child(_M,_B,5.82,sy*.85,.8,1,1.3,1.3)),L.tail.setMatrixAt(nh++,child(_M,_B,-5.82,sy*.85,.8,1,1.3,1.3));
+    }else{
+      L.boxBody.setMatrixAt(nb,child(_M,_B,0,0,.6,26,2.5,2.5));L.boxBody.setColorAt(nb,v.col);
+      L.boxRoof.setMatrixAt(nb,child(_M,_B,0,0,3.1,25.6,2.2,.15));nb++;
+      L.boxWin.setMatrixAt(nwin++,child(_M,_B,0,0,1.5,26.06,2.54,1.1));
+      L.boxWin.setMatrixAt(nwin++,child(_M,_B,8,0,.15,4,2.1,.45));
+      L.boxWin.setMatrixAt(nwin++,child(_M,_B,-8,0,.15,4,2.1,.45));
+      L.head.setMatrixAt(nh,child(_M,_B,13.03,0,1.0,1,1.8,1.4));L.tail.setMatrixAt(nh++,child(_M,_B,-13.03,0,1.0,1,1.8,1.4));
+    }
+  }
+  L.carBody.count=L.carRoof.count=L.carCabin.count=nc;
+  L.head.count=L.tail.count=nh;L.tail.count=Math.min(L.tail.count,nh);
+  L.wheels.count=nw;L.boxBody.count=L.boxRoof.count=nb;L.boxWin.count=nwin;
+  for(const m of [L.carBody,L.carCabin,L.carRoof,L.wheels,L.head,L.tail,L.boxBody,L.boxRoof,L.boxWin])m.instanceMatrix.needsUpdate=true;
+  if(L.carBody.instanceColor){L.carBody.instanceColor.needsUpdate=L.carRoof.instanceColor.needsUpdate=L.boxBody.instanceColor.needsUpdate=true;}
+}
+
+
+/* ---------- будинки: вікна, скатні дахи, ТЦ, скляні вежі ---------- */
+function makeBuildingMeshes(){
+  const N=512,cell=128;
+  const rnd=(i,j,o)=>hsh(i*7+1+o,j*13+3);
+  const cA=document.createElement('canvas'),eA=document.createElement('canvas'),cG=document.createElement('canvas'),eG=document.createElement('canvas');
+  for(const c of [cA,eA,cG,eG])c.width=c.height=N;
+  let g=cA.getContext('2d'),ge=eA.getContext('2d');
+  g.fillStyle='#f4f1ea';g.fillRect(0,0,N,N);ge.fillStyle='#000';ge.fillRect(0,0,N,N);
+  for(let i=0;i<4;i++)for(let j=0;j<4;j++){
+    const x=i*cell,y=j*cell;
+    g.fillStyle='#d6d1c5';g.fillRect(x+22,y+22,84,86);
+    g.fillStyle='#2c3b57';g.fillRect(x+28,y+28,72,70);
+    g.fillStyle='#4d6486';g.fillRect(x+28,y+28,72,12);
+    g.fillStyle='#ddd8cc';g.fillRect(x+24,y+100,80,7);
+    g.fillStyle='#1c2638';g.fillRect(x+62,y+28,4,70);
+    if(rnd(i,j,0)<.42){ge.fillStyle='#ffcf7a';ge.fillRect(x+28,y+28,72,70);}
+  }
+  g=cG.getContext('2d');ge=eG.getContext('2d');
+  const gr=g.createLinearGradient(0,0,0,N);gr.addColorStop(0,'#5a7391');gr.addColorStop(1,'#34465f');
+  g.fillStyle=gr;g.fillRect(0,0,N,N);
+  g.fillStyle='#aab9cb';for(let x=0;x<N;x+=64)g.fillRect(x,0,3,N);
+  g.fillStyle='#d3dbe5';for(let y=0;y<N;y+=128)g.fillRect(0,y,N,6);
+  ge.fillStyle='#000';ge.fillRect(0,0,N,N);
+  for(let i=0;i<8;i++)for(let j=0;j<4;j++)if(rnd(i,j,5)<.3){ge.fillStyle='#ffe2a0';ge.fillRect(i*64+4,j*128+10,56,108);}
+  const tex=(c)=>{const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;t.repeat.set(1/12.8,1/12.8);t.colorSpace=THREE.SRGBColorSpace;t.anisotropy=4;return t;};
+  const mat=(m,e,met,rou)=>new THREE.MeshStandardMaterial({map:tex(m),emissiveMap:tex(e),emissive:0xffffff,emissiveIntensity:0,vertexColors:true,roughness:rou,metalness:met,flatShading:true,side:THREE.DoubleSide});
+  L.mWallA=mat(cA,eA,0,.85);L.mWallG=mat(cG,eG,.35,.25);
+  const mRoof=new THREE.MeshStandardMaterial({vertexColors:true,roughness:.9,metalness:0,flatShading:true,side:THREE.DoubleSide});
+  L.bGroup=new THREE.Group();L.bGroup.visible=false;
+  L.bA=new THREE.Mesh(new THREE.BufferGeometry(),L.mWallA);
+  L.bG=new THREE.Mesh(new THREE.BufferGeometry(),L.mWallG);
+  L.bR=new THREE.Mesh(new THREE.BufferGeometry(),mRoof);
+  for(const m of [L.bA,L.bG,L.bR]){m.frustumCulled=false;L.bGroup.add(m);}
+  L.scene.add(L.bGroup);
+}
+const bldCache=new Map();
+const PAL={
+  house:['#e8d9b5','#d9c7a1','#efe9dc','#c9b79c','#e0b9a0','#f1e4c8'],
+  block:['#cfc8bb','#b9b4aa','#d8d2c4','#c4b8a8','#a9b3bb','#d9cdb8'],
+  mall:['#d3dae1','#bccad6','#e2e6ea'],
+  tower:['#9fb3c8','#8aa0b8']
+};
+const ROOF={house:['#a14a38','#8a3f30','#5f6670','#7a5a3a','#9c5a3c'],block:['#6b6f75','#55595f','#7a7f86'],mall:['#7b8088','#6a6f77'],tower:['#5c6470','#4a515c']};
+const pick=(a,r)=>a[Math.min(a.length-1,Math.floor(r*a.length))];
+function pushTri(arr,a,b,c,col){
+  for(const v of [a,b,c]){arr.pos.push(v[0],v[1],v[2]);arr.col.push(col.r,col.g,col.b);}
+}
+function buildOne(rings,pr){
+  let h=pr.render_height!=null?+pr.render_height:6,minh=+pr.render_min_height||0;
+  if(h-minh<2.5)h=minh+3;
+  const loc=rings.map(r=>r.map(p=>toLocal(p[0],p[1])));
+  const o=loc[0];if(o.length<4)return null;
+  let cx=0,cy=0;for(const p of o){cx+=p[0];cy+=p[1];}cx/=o.length;cy/=o.length;
+  let area=0;for(let i=0,j=o.length-1;i<o.length;j=i++)area+=o[j][0]*o[i][1]-o[i][0]*o[j][1];area=Math.abs(area)/2;
+  if(area<12)return null;
+  const kind=(area>2500&&h<=26)?'mall':(h>=45&&area>400)?'tower':(h<9&&area<350)?'house':'block';
+  const rr=hsh(cx*.31,cy*.17);
+  const wc=new THREE.Color(pick(PAL[kind],rr)),rc=new THREE.Color(pick(ROOF[kind],hsh(cy*.23,cx*.11)));
+  const sh=new THREE.Shape(o.map(p=>new THREE.Vector2(p[0]-cx,p[1]-cy)));
+  for(let i=1;i<loc.length;i++)sh.holes.push(new THREE.Path(loc[i].map(p=>new THREE.Vector2(p[0]-cx,p[1]-cy))));
+  const geo=new THREE.ExtrudeGeometry(sh,{depth:h-minh+.12,bevelEnabled:false});
+  geo.scale(1.015,1.015,1);geo.translate(cx,cy,minh);
+  const P=geo.attributes.position.array,U=geo.attributes.uv.array;
+  const out={kind,wpos:[],wuv:[],wcol:[],rpos:[],rcol:[]};
+  for(const gp of geo.groups){
+    if(gp.materialIndex===1){
+      for(let i=gp.start;i<gp.start+gp.count;i++){
+        out.wpos.push(P[i*3],P[i*3+1],P[i*3+2]);out.wuv.push(U[i*2],U[i*2+1]);out.wcol.push(wc.r,wc.g,wc.b);
+      }
+    }else{
+      for(let i=gp.start;i<gp.start+gp.count;i++){
+        out.rpos.push(P[i*3],P[i*3+1],P[i*3+2]);out.rcol.push(rc.r,rc.g,rc.b);
+      }
+    }
+  }
+  geo.dispose();
+  if(kind==='house'&&minh===0){
+    // двосхилий дах по мінімальному прямокутнику
+    let bl=0,ang=0;
+    for(let i=0,j=o.length-1;i<o.length;j=i++){const dx=o[i][0]-o[j][0],dy=o[i][1]-o[j][1],l=Math.hypot(dx,dy);if(l>bl){bl=l;ang=Math.atan2(dy,dx);}}
+    const ca=Math.cos(ang),sa=Math.sin(ang);
+    let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;
+    for(const p of o){const x=(p[0]-cx)*ca+(p[1]-cy)*sa,y=-(p[0]-cx)*sa+(p[1]-cy)*ca;if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;}
+    const ov=.35,my=(y0+y1)/2,H=h+.12,rh=Math.min(x1-x0,y1-y0)*.3+.9;
+    const T=(x,y,z)=>[cx+x*ca-y*sa,cy+x*sa+y*ca,z];
+    const A=T(x0-ov,y0-ov,H),B=T(x1+ov,y0-ov,H),C=T(x1+ov,y1+ov,H),D=T(x0-ov,y1+ov,H),R1=T(x0-ov,my,H+rh),R2=T(x1+ov,my,H+rh);
+    const a={pos:out.rpos,col:out.rcol};
+    pushTri(a,A,B,R2,rc);pushTri(a,A,R2,R1,rc);pushTri(a,C,D,R1,rc);pushTri(a,C,R1,R2,rc);
+    pushTri(a,D,A,R1,rc);pushTri(a,B,C,R2,rc);
   }
   return out;
 }
-let lastT=0,fr=0;
-function carLoop(t){
-  const dt=Math.min(.1,(t-lastT)/1000);lastT=t;
-  if(cars.length&&map.getZoom()>=15.5){
-    for(const c of cars)step(c,dt);
-    if((fr++&1)===0)map.getSource('cars').setData({type:'FeatureCollection',features:carFeatures()});
+function buildBuildings(){
+  if(!L.ready||map.getZoom()<16.3)return;
+  const b=map.getBounds().toArray(),pad=.0006,c=map.getCenter();
+  const W0=b[0][0]-pad,S0=b[0][1]-pad,E0=b[1][0]+pad,N0=b[1][1]+pad;
+  const fs=map.querySourceFeatures(SRC,{sourceLayer:'building'});
+  const items=[];
+  for(const f of fs){
+    const g=f.geometry;if(!g)continue;
+    const polys=g.type==='Polygon'?[g.coordinates]:(g.type==='MultiPolygon'?g.coordinates:[]);
+    for(const rings of polys){
+      const p0=rings[0][0];
+      if(p0[0]<W0||p0[0]>E0||p0[1]<S0||p0[1]>N0)continue;
+      const key=pkey(p0)+'|'+rings[0].length+'|'+(f.properties.render_height||0);
+      items.push({key,rings,pr:f.properties,d:Math.hypot((p0[0]-c.lng)*KX0,(p0[1]-c.lat)*M_LAT)});
+    }
   }
-  requestAnimationFrame(carLoop);
+  items.sort((a,b)=>a.d-b.d);
+  if(bldCache.size>3000)bldCache.clear();
+  const sel=[],seen=new Set();
+  for(const it of items){
+    if(seen.has(it.key))continue;seen.add(it.key);
+    let d=bldCache.get(it.key);
+    if(d===undefined){try{d=buildOne(it.rings,it.pr);}catch(e){d=null;}bldCache.set(it.key,d);}
+    if(d)sel.push(d);
+    if(sel.length>=450)break;
+  }
+  const merge=(mesh,list,pk,uk,ck)=>{
+    let n=0;for(const d of list)n+=d[pk].length;
+    const pos=new Float32Array(n),col=new Float32Array(n),uv=uk?new Float32Array(n/3*2):null;
+    let o=0,ou=0;
+    for(const d of list){pos.set(d[pk],o);col.set(d[ck],o);o+=d[pk].length;if(uk){uv.set(d[uk],ou);ou+=d[uk].length;}}
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.BufferAttribute(pos,3));
+    g.setAttribute('color',new THREE.BufferAttribute(col,3));
+    if(uk)g.setAttribute('uv',new THREE.BufferAttribute(uv,2));
+    mesh.geometry.dispose();mesh.geometry=g;
+  };
+  const wallsA=sel.filter(d=>d.kind==='house'||d.kind==='block');
+  const wallsG=sel.filter(d=>d.kind==='mall'||d.kind==='tower');
+  merge(L.bA,wallsA,'wpos','wuv','wcol');
+  merge(L.bG,wallsG,'wpos','wuv','wcol');
+  merge(L.bR,sel,'rpos',null,'rcol');
 }
 
+const live3d={
+  id:'live3d',type:'custom',renderingMode:'3d',
+  onAdd(m,gl){
+    L.camera=new THREE.Camera();L.scene=new THREE.Scene();
+    L.renderer=new THREE.WebGLRenderer({canvas:m.getCanvas(),context:gl,antialias:true});
+    L.renderer.autoClear=false;
+    buildModels();
+    L.ready=true;applyLive();
+  },
+  render(gl,matrix){
+    if(map.getZoom()<15){return;}
+    const now=performance.now(),dt=Math.min(.1,(now-(L.t||now))/1000);L.t=now;
+    updateVehicles(dt);
+    if(L.bGroup)L.bGroup.visible=map.getZoom()>=16.3;
+    const mc=maplibregl.MercatorCoordinate.fromLngLat(ORIGIN,0),sc=mc.meterInMercatorCoordinateUnits();
+    const m=new THREE.Matrix4().fromArray(matrix);
+    const l=new THREE.Matrix4().makeTranslation(mc.x,mc.y,mc.z).scale(new THREE.Vector3(sc,-sc,sc));
+    L.camera.projectionMatrix=m.multiply(l);
+    L.renderer.resetState();
+    L.renderer.render(L.scene,L.camera);
+    map.triggerRepaint();
+  }
+};
+
 map.on('load',()=>{
-  const ext={type:'fill-extrusion',paint:{
-    'fill-extrusion-color':['coalesce',['get','col'],'#3a8a3a'],
-    'fill-extrusion-height':['get','h'],'fill-extrusion-base':['get','base'],
-    'fill-extrusion-opacity':.97,'fill-extrusion-vertical-gradient':true}};
-  map.addSource('trees',{type:'geojson',data:EMPTY});
-  map.addSource('cars',{type:'geojson',data:EMPTY});
-  map.addLayer(Object.assign({id:'trees',source:'trees',minzoom:15.5},ext));
-  map.addLayer(Object.assign({id:'cars',source:'cars',minzoom:15.5},ext));
-  applyLook();
-  requestAnimationFrame(carLoop);
+  try{
+    if(typeof THREE==='undefined')throw new Error('three.js не завантажився');
+    map.addLayer({id:'tram-line',type:'line',source:SRC,'source-layer':'transportation',minzoom:13,
+      filter:['in','subclass','tram','light_rail'],
+      paint:{'line-color':'#7a8296','line-width':['interpolate',['linear'],['zoom'],13,.6,19,2.2],'line-opacity':.9}},'building');
+    map.addLayer(live3d);
+    applyLook();
+  }catch(e){showErr('3D: '+e.message);}
 });
 let schedH=0;
-function sched(){clearTimeout(schedH);schedH=setTimeout(()=>{try{buildTrees();buildRoads();}catch(e){showErr('LIVE: '+e.message);}},350);}
+function sched(){clearTimeout(schedH);schedH=setTimeout(()=>{try{buildTrees();buildRoads();}catch(e){showErr('LIVE: '+e.message);}try{buildBuildings();}catch(e){showErr('BLD: '+e.message);}},350);}
 map.on('moveend',sched);
 map.on('sourcedata',e=>{if(e.sourceId===SRC&&e.isSourceLoaded)sched();});
 
