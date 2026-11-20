@@ -154,14 +154,14 @@ function applyLook(){
   const k=clamp(sun*3,0,1);                 // 0 ніч .. 1 день
   const warm=(k>0&&k<1)?Math.sin(Math.PI*k)*.3:0; // схід/захід
   const w=state.weather;
-  const pal={};
+  const pal={},raw={};
   for(const key of Object.keys(DAY)){
     let c=mix(NIGHT[key],DAY[key],k);
     if(warm>0) c=mix(c,[255,170,110],warm*.5);
     if(w==='cloud') c=mix(c,hex(GRAY),.22*k+.08);
     if(w==='rain')  c=mix(c,hex(GRAY),.4*k+.15);
     if(w==='snow')  c=mix(c,mix(NIGHT[key],SNOW[key],.45+.55*k),.85);
-    pal[key]=css(c);
+    raw[key]=c;pal[key]=css(c);
   }
   const s=(l,p,v)=>{if(map.getLayer(l))map.setPaintProperty(l,p,v)};
   s('bg','background-color',pal.bg);
@@ -173,7 +173,21 @@ function applyLook(){
   s('road-major','line-color',pal.road);
   s('road-minor','line-color',pal.minor);
   s('road-glow','line-opacity',(1-k)*.85);
-  s('building','fill-extrusion-color',['interpolate',['linear'],['coalesce',['get','render_height'],6],0,pal.bld,70,pal.bldHi]);
+  {
+    const hh=['coalesce',['get','render_height'],6];
+    const base=['interpolate',['linear'],hh,0,pal.bld,70,pal.bldHi];
+    const night=1-k;
+    if(night>.05){
+      const lit=css(mix(raw.bld,[255,206,120],night*.9));
+      s('building','fill-extrusion-color',['case',['<',['%',['*',hh,13.37],1],.4],lit,base]);
+    }else s('building','fill-extrusion-color',base);
+  }
+  {
+    let ca=mix([14,40,26],[62,138,62],k),cb=mix([10,32,22],[44,112,52],k);
+    if(w==='snow'){ca=mix(ca,[232,240,247],.65);cb=mix(cb,[220,232,242],.65);}
+    else if(w!=='clear'){ca=mix(ca,hex(GRAY),.2);cb=mix(cb,hex(GRAY),.2);}
+    s('trees','fill-extrusion-color',['case',['==',['get','part'],'trunk'],css(mix([30,22,16],[104,76,50],k)),['>',['get','tone'],.5],css(ca),css(cb)]);
+  }
   const az=(h>=6&&h<=18)?90+180*((h-6)/12):200;
   const polar=90-62*sun;
   const lc=k>.5?(w==='clear'?'#fff3da':'#e6ebf5'):'#7b8cc8';
@@ -334,6 +348,189 @@ function checkVisit(){
 }
 map.on('moveend',checkVisit);
 render();
+
+/* ---------- живе місто: дерева і машини ---------- */
+const M_LAT=111320;
+const mLon=lat=>M_LAT*Math.cos(lat*Math.PI/180);
+const EMPTY={type:'FeatureCollection',features:[]};
+const treeCache=new Map();
+let roads=[],cars=[];
+const endIdx=new Map();
+const hsh=(a,b)=>{const q=Math.sin(a*127.1+b*311.7)*43758.5453;return q-Math.floor(q)};
+const pkey=p=>p[0].toFixed(5)+','+p[1].toFixed(5);
+
+function circle(c,r,n){
+  const kx=mLon(c[1]),ring=[];
+  for(let i=0;i<n;i++){const a=i/n*Math.PI*2+.4;ring.push([c[0]+Math.cos(a)*r/kx,c[1]+Math.sin(a)*r/M_LAT]);}
+  ring.push(ring[0]);return ring;
+}
+function inRing(x,y,ring){
+  let ins=false;
+  for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+    const xi=ring[i][0],yi=ring[i][1],xj=ring[j][0],yj=ring[j][1];
+    if((yi>y)!==(yj>y)&&x<(xj-xi)*(y-yi)/(yj-yi)+xi)ins=!ins;
+  }
+  return ins;
+}
+function inPoly(x,y,rings){
+  if(!inRing(x,y,rings[0]))return false;
+  for(let i=1;i<rings.length;i++)if(inRing(x,y,rings[i]))return false;
+  return true;
+}
+const poly=(ring,props)=>({type:'Feature',properties:props,geometry:{type:'Polygon',coordinates:[ring]}});
+
+function buildTrees(){
+  if(!map.getSource('trees')||map.getZoom()<15.8)return;
+  const b=map.getBounds().toArray(),pad=.0015;
+  const W0=b[0][0]-pad,S0=b[0][1]-pad,E0=b[1][0]+pad,N0=b[1][1]+pad;
+  const feats=[].concat(
+    map.querySourceFeatures(SRC,{sourceLayer:'park'}),
+    map.querySourceFeatures(SRC,{sourceLayer:'landcover',filter:['==',['get','class'],'wood']})
+  );
+  const lat0=(S0+N0)/2,sx=15/mLon(lat0),sy=15/M_LAT;
+  if(treeCache.size>6000)treeCache.clear();
+  for(const f of feats){
+    const g=f.geometry;if(!g)continue;
+    const polys=g.type==='Polygon'?[g.coordinates]:(g.type==='MultiPolygon'?g.coordinates:[]);
+    for(const rings of polys){
+      let mnx=1e9,mny=1e9,mxx=-1e9,mxy=-1e9;
+      for(const p of rings[0]){if(p[0]<mnx)mnx=p[0];if(p[0]>mxx)mxx=p[0];if(p[1]<mny)mny=p[1];if(p[1]>mxy)mxy=p[1];}
+      const x0=Math.max(mnx,W0),x1=Math.min(mxx,E0),y0=Math.max(mny,S0),y1=Math.min(mxy,N0);
+      if(x0>=x1||y0>=y1)continue;
+      for(let ix=Math.floor(x0/sx);ix<=Math.ceil(x1/sx);ix++)for(let iy=Math.floor(y0/sy);iy<=Math.ceil(y1/sy);iy++){
+        const key=ix+'_'+iy;
+        if(treeCache.has(key))continue;
+        const r1=hsh(ix,iy);
+        if(r1>.62)continue;
+        const x=(ix+hsh(iy,ix+7))*sx,y=(iy+hsh(ix+3,iy+11))*sy;
+        if(!inPoly(x,y,rings))continue;
+        const c=[x,y],r=2.6+hsh(ix+5,iy+9)*2.6,tone=hsh(ix+1,iy+2),th=7+hsh(ix+9,iy+4)*6;
+        treeCache.set(key,{c,f:[
+          poly(circle(c,.45,4),{part:'trunk',base:0,h:3.2,tone}),
+          poly(circle(c,r,8),{part:'crown',base:2.6,h:2.6+th*.62,tone}),
+          poly(circle(c,r*.6,8),{part:'crown',base:2.6+th*.55,h:2.6+th,tone})
+        ]});
+      }
+    }
+  }
+  const out=[];
+  for(const v of treeCache.values()){
+    if(v.c[0]<W0||v.c[0]>E0||v.c[1]<S0||v.c[1]>N0)continue;
+    for(const f of v.f)out.push(f);
+  }
+  map.getSource('trees').setData({type:'FeatureCollection',features:out});
+}
+
+/* ---- машини ---- */
+function buildRoads(){
+  if(!map.getSource('cars')||map.getZoom()<15.5)return;
+  const fs=map.querySourceFeatures(SRC,{sourceLayer:'transportation',
+    filter:['all',['in',['get','class'],['literal',['trunk','primary','secondary','tertiary','minor']]],['!=',['get','brunnel'],'tunnel']]});
+  const seen=new Set(),list=[];
+  endIdx.clear();
+  for(const f of fs){
+    const g=f.geometry;if(!g)continue;
+    const lines=g.type==='LineString'?[g.coordinates]:(g.type==='MultiLineString'?g.coordinates:[]);
+    for(const pts of lines){
+      if(pts.length<2)continue;
+      const cum=[0];
+      for(let i=1;i<pts.length;i++){
+        const kx=mLon(pts[i][1]);
+        cum.push(cum[i-1]+Math.hypot((pts[i][0]-pts[i-1][0])*kx,(pts[i][1]-pts[i-1][1])*M_LAT));
+      }
+      const len=cum[cum.length-1];
+      if(len<10)continue;
+      const id=pkey(pts[0])+'|'+pkey(pts[pts.length-1])+'|'+len.toFixed(0);
+      if(seen.has(id))continue;seen.add(id);
+      const road={pts,cum,len,cls:f.properties.class};
+      list.push(road);
+      for(const [p,atStart] of [[pts[0],true],[pts[pts.length-1],false]]){
+        const k=pkey(p);if(!endIdx.has(k))endIdx.set(k,[]);
+        endIdx.get(k).push({road,atStart});
+      }
+    }
+  }
+  roads=list;
+  const b=map.getBounds().toArray(),pad=.002;
+  const inView=p=>p[0]>b[0][0]-pad&&p[0]<b[1][0]+pad&&p[1]>b[0][1]-pad&&p[1]<b[1][1]+pad;
+  cars=cars.filter(c=>{const p=posAt(c);return inView([p.lon,p.lat]);});
+  const cand=roads.filter(r=>inView(r.pts[Math.floor(r.pts.length/2)]));
+  const target=Math.min(170,Math.round(cand.length*.7));
+  const COLS=['#e63946','#f4a261','#2a9d8f','#e9ecef','#264653','#ffd166','#4361ee','#adb5bd','#111827','#8ecae6'];
+  while(cars.length<target&&cand.length){
+    const r=cand[Math.floor(Math.random()*cand.length)];
+    cars.push({road:r,d:Math.random()*r.len,dir:Math.random()<.5?1:-1,
+      v:(r.cls==='minor'?6:10)+Math.random()*5,col:COLS[Math.floor(Math.random()*COLS.length)]});
+  }
+}
+function posAt(car){
+  const r=car.road,d=car.d;
+  let i=1;while(i<r.cum.length-1&&r.cum[i]<d)i++;
+  const d0=r.cum[i-1],d1=r.cum[i],t=Math.max(0,Math.min(1,(d-d0)/((d1-d0)||1)));
+  const a=r.pts[i-1],bb=r.pts[i];
+  const lat=a[1]+(bb[1]-a[1])*t,lon=a[0]+(bb[0]-a[0])*t,kx=mLon(lat);
+  let hx=(bb[0]-a[0])*kx,hy=(bb[1]-a[1])*M_LAT;
+  if(car.dir<0){hx=-hx;hy=-hy;}
+  const hl=Math.hypot(hx,hy)||1;hx/=hl;hy/=hl;
+  const off=1.8;
+  return {lon:lon+hy*off/kx,lat:lat-hx*off/M_LAT,hx,hy};
+}
+function step(car,dt){
+  car.d+=car.dir*car.v*dt;
+  const r=car.road;
+  if(car.d>=r.len||car.d<=0){
+    const atEnd=car.d>=r.len,p=atEnd?r.pts[r.pts.length-1]:r.pts[0];
+    const opts=(endIdx.get(pkey(p))||[]).filter(o=>o.road!==r);
+    if(opts.length){
+      const o=opts[Math.floor(Math.random()*opts.length)];
+      car.road=o.road;car.d=o.atStart?0:o.road.len;car.dir=o.atStart?1:-1;
+    }else{car.dir*=-1;car.d=Math.max(0,Math.min(r.len,car.d));}
+  }
+}
+function box(lon,lat,hx,hy,a0,a1,b0,b1){ // a: вздовж, b: впоперек (м)
+  const kx=mLon(lat),ring=[];
+  for(const [a,b] of [[a1,b1],[a1,b0],[a0,b0],[a0,b1],[a1,b1]]){
+    ring.push([lon+(hx*a-hy*b)/kx,lat+(hy*a+hx*b)/M_LAT]);
+  }
+  return ring;
+}
+function carFeatures(){
+  const out=[];
+  for(const c of cars){
+    const p=posAt(c);
+    out.push(poly(box(p.lon,p.lat,p.hx,p.hy,-2.1,2.1,-.95,.95),{base:.3,h:1.35,col:c.col}));
+    out.push(poly(box(p.lon,p.lat,p.hx,p.hy,-1.0,.9,-.8,.8),{base:1.35,h:2.0,col:'#1b2433'}));
+    out.push(poly(box(p.lon,p.lat,p.hx,p.hy,2.05,2.2,-.8,.8),{base:.55,h:.95,col:'#fff1b0'}));
+  }
+  return out;
+}
+let lastT=0,fr=0;
+function carLoop(t){
+  const dt=Math.min(.1,(t-lastT)/1000);lastT=t;
+  if(cars.length&&map.getZoom()>=15.5){
+    for(const c of cars)step(c,dt);
+    if((fr++&1)===0)map.getSource('cars').setData({type:'FeatureCollection',features:carFeatures()});
+  }
+  requestAnimationFrame(carLoop);
+}
+
+map.on('load',()=>{
+  const ext={type:'fill-extrusion',paint:{
+    'fill-extrusion-color':['coalesce',['get','col'],'#3a8a3a'],
+    'fill-extrusion-height':['get','h'],'fill-extrusion-base':['get','base'],
+    'fill-extrusion-opacity':.97,'fill-extrusion-vertical-gradient':true}};
+  map.addSource('trees',{type:'geojson',data:EMPTY});
+  map.addSource('cars',{type:'geojson',data:EMPTY});
+  map.addLayer(Object.assign({id:'trees',source:'trees',minzoom:15.5},ext));
+  map.addLayer(Object.assign({id:'cars',source:'cars',minzoom:15.5},ext));
+  applyLook();
+  requestAnimationFrame(carLoop);
+});
+let schedH=0;
+function sched(){clearTimeout(schedH);schedH=setTimeout(()=>{try{buildTrees();buildRoads();}catch(e){showErr('LIVE: '+e.message);}},350);}
+map.on('moveend',sched);
+map.on('sourcedata',e=>{if(e.sourceId===SRC&&e.isSourceLoaded)sched();});
+
 </script>
 </body>
 </html>
