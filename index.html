@@ -100,7 +100,7 @@ window.addEventListener('unhandledrejection',function(e){showErr('PROMISE: '+(e.
 <script crossorigin="anonymous" src="https://unpkg.com/three@0.152.2/build/three.min.js"></script>
 <script>
 if(typeof maplibregl==='undefined'){showErr('MapLibre не завантажився (unpkg.com заблоковано або немає інтернету). Файл треба відкривати у звичайному браузері, не в прев’ю.');}
-else if(!maplibregl.supported()){showErr('WebGL недоступний у цьому браузері/прев’ю. Відкрий у Chrome/Safari.');}
+else{try{var _c=document.createElement('canvas');if(!(_c.getContext('webgl2')||_c.getContext('webgl')))showErr('WebGL недоступний у цьому браузері. Відкрий у Chrome/Safari.');}catch(e){showErr('WebGL недоступний: '+e.message);}}
 </script>
 <script>
 /* ---------- палитры ---------- */
