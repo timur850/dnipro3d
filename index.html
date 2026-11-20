@@ -117,6 +117,9 @@ const style={
     {id:'bg',type:'background',paint:{'background-color':DAY.bg}},
     {id:'wood',type:'fill',source:SRC,'source-layer':'landcover',filter:['==',['get','class'],'wood'],paint:{'fill-color':DAY.wood}},
     {id:'grass',type:'fill',source:SRC,'source-layer':'landcover',filter:['in',['get','class'],['literal',['grass','farmland','wetland']]],paint:{'fill-color':DAY.park}},
+    {id:'landuse',type:'fill',source:SRC,'source-layer':'landuse',minzoom:12,
+      filter:['in',['get','class'],['literal',['retail','commercial','industrial','hospital','school','university','college','kindergarten','stadium','pitch','playground','cemetery']]],
+      paint:{'fill-color':'#f6e4a8','fill-opacity':.85}},
     {id:'park',type:'fill',source:SRC,'source-layer':'park',paint:{'fill-color':DAY.park,'fill-opacity':.9}},
     {id:'water',type:'fill',source:SRC,'source-layer':'water',paint:{'fill-color':DAY.water}},
     {id:'waterway',type:'line',source:SRC,'source-layer':'waterway',paint:{'line-color':DAY.water,'line-width':2}},
@@ -138,7 +141,21 @@ const style={
         'fill-extrusion-height':['coalesce',['get','render_height'],6],
         'fill-extrusion-base':['coalesce',['get','render_min_height'],0],
         'fill-extrusion-opacity':.96,
-        'fill-extrusion-vertical-gradient':true}}
+        'fill-extrusion-vertical-gradient':true}},
+    {id:'poi-dots',type:'circle',source:SRC,'source-layer':'poi',minzoom:15.5,
+      paint:{
+        'circle-radius':['interpolate',['linear'],['zoom'],15.5,3,19,7],
+        'circle-stroke-width':1.6,'circle-stroke-color':'#ffffff',
+        'circle-color':['match',['get','class'],
+          ['restaurant','cafe','fast_food','bar','bakery','ice_cream'],'#f2762e',
+          ['shop','grocery','clothing_store','supermarket','department_store','mall','convenience','jewelry','florist','alcohol_shop','bank'],'#3f7de0',
+          ['lodging'],'#e7609c',
+          ['hospital','doctors','pharmacy','clinic','dentist'],'#e04848',
+          ['school','college','university','kindergarten','library'],'#8a6fd1',
+          ['place_of_worship'],'#b08a4a',
+          ['park','playground','zoo','stadium','pitch'],'#2fa35a',
+          ['museum','theatre','cinema','attraction','monument'],'#d4a017',
+          '#7e8794']}}
   ],
   light:{anchor:'map',color:'#fff3da',intensity:.45,position:[1.15,200,40]}
 };
@@ -173,6 +190,17 @@ function applyLook(){
   s('wood','fill-color',pal.wood);
   s('grass','fill-color',pal.park);
   s('park','fill-color',pal.park);
+  {
+    const lu=c=>{let x=mix(NIGHT.bg,c,k);if(w==='snow')x=mix(x,[236,242,248],.6);else if(w!=='clear')x=mix(x,hex(GRAY),.12);return css(x);};
+    s('landuse','fill-color',['match',['get','class'],
+      ['retail','commercial'],lu([247,229,166]),
+      ['industrial'],lu([214,206,214]),
+      ['hospital'],lu([246,200,196]),
+      ['school','university','college','kindergarten'],lu([238,226,196]),
+      ['stadium','pitch','playground'],lu([176,222,150]),
+      ['cemetery'],lu([168,208,160]),
+      pal.bg]);
+  }
   s('water','fill-color',pal.water);
   s('waterway','line-color',pal.water);
   s('road-major','line-color',pal.road);
@@ -711,14 +739,73 @@ const PAL={
   house:['#f4d8a4','#f6b9a0','#ebe4c8','#b9d6ea','#f2c47a','#d9ecc4'],
   block:['#eadfc6','#d6e3f0','#f4d3c2','#cfe6c8','#ecdeb4','#f0c9b0'],
   mall:['#e6eef7','#ffd9a0','#cfe4f4'],
-  tower:['#9fc0e0','#86aad0']
+  tower:['#9fc0e0','#86aad0'],
+  commercial:['#f6e7b4','#f2dba0','#ead9a8'],
+  shop:['#cfe0f5','#e3ecf8'],
+  cafe:['#ffd3a6','#ffe2b8'],
+  hotel:['#f3bfd0','#f6d3de'],
+  hospital:['#f8f4f4'],
+  school:['#f6d768','#f2cf55'],
+  church:['#f7f2e4'],
+  office:['#b7d0ea','#9fbfe0'],
+  industrial:['#cfc9c9','#bdb7b9']
 };
-const ROOF={house:['#d0452f','#b8392a','#e0662f','#3a6ea5','#c9502e'],block:['#c0563c','#7a8794','#a84a38','#5b7fa8'],mall:['#8a93a0','#c0563c'],tower:['#5c6a7c','#475467']};
+const ROOF={
+  house:['#d0452f','#b8392a','#e0662f','#3a6ea5','#c9502e'],block:['#c0563c','#7a8794','#a84a38','#5b7fa8'],
+  mall:['#8a93a0','#c0563c'],tower:['#5c6a7c','#475467'],commercial:['#8e949c','#7c828a'],
+  shop:['#d9503f','#3f7de0'],cafe:['#f2762e'],hotel:['#9a7b8a','#7a6a78'],hospital:['#d94b4b'],
+  school:['#c0563c'],church:['#e0b43c'],office:['#5c6a7c'],industrial:['#7c7f86','#8a8d94']
+};
+const GLASS_KINDS=['mall','tower','office','shop'];
+/* категорії з даних OSM: POI всередині будівлі + зона землекористування */
+const CTX={pois:[],lus:[]};
+function poiCat(p){
+  const c=p.class||'',sc=p.subclass||'';
+  if(c==='place_of_worship')return 'church';
+  if(['hospital','doctors','clinic','dentist'].includes(c)||sc==='hospital')return 'hospital';
+  if(['school','college','university','kindergarten'].includes(c))return 'school';
+  if(c==='lodging')return 'hotel';
+  if(sc==='mall'||sc==='department_store'||c==='department_store')return 'mall';
+  if(c==='shop'||['supermarket','grocery','clothing_store'].includes(c)||sc==='supermarket')return 'shop';
+  if(['bank','office'].includes(c))return 'office';
+  if(['restaurant','cafe','fast_food','bar','bakery'].includes(c))return 'cafe';
+  return null;
+}
+const CAT_PRI=['church','hospital','school','hotel','mall','shop','office','cafe'];
+function prepareCtx(){
+  CTX.pois=[];CTX.lus=[];
+  for(const f of map.querySourceFeatures(SRC,{sourceLayer:'poi'})){
+    if(!f.geometry||f.geometry.type!=='Point')continue;
+    const c=poiCat(f.properties);if(!c)continue;
+    CTX.pois.push({x:f.geometry.coordinates[0],y:f.geometry.coordinates[1],c});
+  }
+  for(const f of map.querySourceFeatures(SRC,{sourceLayer:'landuse'})){
+    const cl=f.properties.class;
+    if(!['retail','commercial','industrial'].includes(cl)||!f.geometry)continue;
+    const g=f.geometry,polys=g.type==='Polygon'?[g.coordinates]:(g.type==='MultiPolygon'?g.coordinates:[]);
+    for(const rings of polys)CTX.lus.push({rings,cl:(cl==='industrial'?'industrial':'commercial')});
+  }
+}
+function catOf(rings){
+  const o=rings[0];
+  let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9,cx=0,cy=0;
+  for(const p of o){if(p[0]<x0)x0=p[0];if(p[0]>x1)x1=p[0];if(p[1]<y0)y0=p[1];if(p[1]>y1)y1=p[1];cx+=p[0];cy+=p[1];}
+  cx/=o.length;cy/=o.length;
+  let best=null,bi=99;
+  for(const p of CTX.pois){
+    if(p.x<x0||p.x>x1||p.y<y0||p.y>y1)continue;
+    const i=CAT_PRI.indexOf(p.c);
+    if(i<bi&&inPoly(p.x,p.y,rings)){best=p.c;bi=i;}
+  }
+  if(best)return best;
+  for(const u of CTX.lus)if(inPoly(cx,cy,u.rings))return u.cl;
+  return null;
+}
 const pick=(a,r)=>a[Math.min(a.length-1,Math.floor(r*a.length))];
 function pushTri(arr,a,b,c,col){
   for(const v of [a,b,c]){arr.pos.push(v[0],v[1],v[2]);arr.col.push(col.r,col.g,col.b);}
 }
-function buildOne(rings,pr){
+function buildOne(rings,pr,cat){
   let h=pr.render_height!=null?+pr.render_height:6,minh=+pr.render_min_height||0;
   if(h-minh<2.5)h=minh+3;
   const loc=rings.map(r=>r.map(p=>toLocal(p[0],p[1])));
@@ -726,7 +813,9 @@ function buildOne(rings,pr){
   let cx=0,cy=0;for(const p of o){cx+=p[0];cy+=p[1];}cx/=o.length;cy/=o.length;
   let area=0;for(let i=0,j=o.length-1;i<o.length;j=i++)area+=o[j][0]*o[i][1]-o[i][0]*o[j][1];area=Math.abs(area)/2;
   if(area<12)return null;
-  const kind=(area>2500&&h<=26)?'mall':(h>=45&&area>400)?'tower':(h<9&&area<350)?'house':'block';
+  let kind;
+  if(cat)kind=(cat==='cafe'&&area>500)?'commercial':cat;
+  else kind=(area>2500&&h<=26)?'mall':(h>=45&&area>400)?'tower':(h<9&&area<350)?'house':'block';
   const rr=hsh(cx*.31,cy*.17);
   const wc=new THREE.Color(pick(PAL[kind],rr)),rc=new THREE.Color(pick(ROOF[kind],hsh(cy*.23,cx*.11)));
   const sh=new THREE.Shape(o.map(p=>new THREE.Vector2(p[0]-cx,p[1]-cy)));
@@ -747,6 +836,14 @@ function buildOne(rings,pr){
     }
   }
   geo.dispose();
+  if(kind==='church'){
+    const rad=Math.max(2,Math.min(7,Math.sqrt(area)*.28));
+    const dg=new THREE.SphereGeometry(rad,10,6,0,Math.PI*2,0,Math.PI/2).toNonIndexed();
+    dg.rotateX(Math.PI/2);dg.translate(cx,cy,h+.12);
+    const dp=dg.attributes.position.array;
+    for(let i=0;i<dp.length;i+=3){out.rpos.push(dp[i],dp[i+1],dp[i+2]);out.rcol.push(1,.78,.2);}
+    dg.dispose();
+  }
   if(kind==='house'&&minh===0){
     // двосхилий дах по мінімальному прямокутнику
     let bl=0,ang=0;
@@ -767,6 +864,7 @@ function buildBuildings(){
   if(!L.ready||map.getZoom()<16.3)return;
   const b=map.getBounds().toArray(),pad=.0006,c=map.getCenter();
   const W0=b[0][0]-pad,S0=b[0][1]-pad,E0=b[1][0]+pad,N0=b[1][1]+pad;
+  prepareCtx();
   const fs=map.querySourceFeatures(SRC,{sourceLayer:'building'});
   const items=[];
   for(const f of fs){
@@ -775,8 +873,9 @@ function buildBuildings(){
     for(const rings of polys){
       const p0=rings[0][0];
       if(p0[0]<W0||p0[0]>E0||p0[1]<S0||p0[1]>N0)continue;
-      const key=pkey(p0)+'|'+rings[0].length+'|'+(f.properties.render_height||0);
-      items.push({key,rings,pr:f.properties,d:Math.hypot((p0[0]-c.lng)*KX0,(p0[1]-c.lat)*M_LAT)});
+      const cat=catOf(rings);
+      const key=pkey(p0)+'|'+rings[0].length+'|'+(f.properties.render_height||0)+'|'+(cat||'');
+      items.push({key,rings,cat,pr:f.properties,d:Math.hypot((p0[0]-c.lng)*KX0,(p0[1]-c.lat)*M_LAT)});
     }
   }
   items.sort((a,b)=>a.d-b.d);
@@ -785,7 +884,7 @@ function buildBuildings(){
   for(const it of items){
     if(seen.has(it.key))continue;seen.add(it.key);
     let d=bldCache.get(it.key);
-    if(d===undefined){try{d=buildOne(it.rings,it.pr);}catch(e){d=null;}bldCache.set(it.key,d);}
+    if(d===undefined){try{d=buildOne(it.rings,it.pr,it.cat);}catch(e){d=null;}bldCache.set(it.key,d);}
     if(d)sel.push(d);
     if(sel.length>=450)break;
   }
@@ -800,8 +899,8 @@ function buildBuildings(){
     if(uk)g.setAttribute('uv',new THREE.BufferAttribute(uv,2));
     mesh.geometry.dispose();mesh.geometry=g;
   };
-  const wallsA=sel.filter(d=>d.kind==='house'||d.kind==='block');
-  const wallsG=sel.filter(d=>d.kind==='mall'||d.kind==='tower');
+  const wallsA=sel.filter(d=>!GLASS_KINDS.includes(d.kind));
+  const wallsG=sel.filter(d=>GLASS_KINDS.includes(d.kind));
   merge(L.bA,wallsA,'wpos','wuv','wcol');
   merge(L.bG,wallsG,'wpos','wuv','wcol');
   merge(L.bR,sel,'rpos',null,'rcol');
@@ -841,6 +940,13 @@ map.on('load',()=>{
     applyLook();
   }catch(e){showErr('3D: '+e.message);}
 });
+map.on('click','poi-dots',e=>{
+  const f=e.features&&e.features[0];if(!f)return;
+  const nm=f.properties['name:uk']||f.properties.name||f.properties.class;
+  new maplibregl.Popup({closeButton:false,offset:8}).setLngLat(e.lngLat).setText(nm).addTo(map);
+});
+map.on('mouseenter','poi-dots',()=>map.getCanvas().style.cursor='pointer');
+map.on('mouseleave','poi-dots',()=>map.getCanvas().style.cursor='');
 let schedH=0;
 function sched(){clearTimeout(schedH);schedH=setTimeout(()=>{try{buildTrees();buildRoads();}catch(e){showErr('LIVE: '+e.message);}try{buildBuildings();}catch(e){showErr('BLD: '+e.message);}},350);}
 map.on('moveend',sched);
