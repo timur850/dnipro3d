@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Дніпро 3D — інтерактивна карта міста</title>
+<link rel="stylesheet" crossorigin="anonymous" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:#0d1224;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#eef2ff;overflow:hidden}
+#map{position:absolute;inset:0}
+#fx{position:absolute;inset:0;pointer-events:none;z-index:2}
+.top{position:absolute;top:max(10px,env(safe-area-inset-top));left:12px;right:12px;z-index:5;display:flex;justify-content:space-between;align-items:center;pointer-events:none}
+.badge{pointer-events:auto;background:rgba(13,18,36,.82);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:8px 12px;font-weight:700;font-size:15px}
+.badge small{display:block;font-weight:500;font-size:11px;opacity:.65}
+.score b{color:#3ee0c4;font-size:17px}
+.panel{position:absolute;left:0;right:0;bottom:0;z-index:5;background:rgba(13,18,36,.92);backdrop-filter:blur(10px);border-top:1px solid rgba(255,255,255,.1);border-radius:18px 18px 0 0;padding:10px 14px max(14px,env(safe-area-inset-bottom));max-width:560px;margin:0 auto}
+.tabs{display:flex;gap:6px;margin-bottom:10px}
+.tab{flex:1;padding:9px 6px;border-radius:12px;border:0;background:#1b2340;color:#aab4d6;font-weight:600;font-size:14px;cursor:pointer}
+.tab.on{background:#3ee0c4;color:#06241f}
+.sec{display:none}.sec.on{display:block}
+.row{display:flex;align-items:center;gap:10px;margin:8px 0}
+.lbl{font-size:11px;letter-spacing:.08em;text-transform:uppercase;opacity:.6;margin-top:6px}
+input[type=range]{flex:1;accent-color:#3ee0c4;height:28px}
+.time{font-variant-numeric:tabular-nums;font-weight:700;min-width:48px;text-align:right}
+.pl{width:38px;height:38px;border-radius:50%;border:0;background:#3ee0c4;color:#06241f;font-size:15px;font-weight:800;cursor:pointer}
+.chips{display:flex;gap:6px}
+.chip{flex:1;padding:10px 4px;border-radius:12px;border:1px solid #2a3560;background:#151c36;color:#dbe2ff;font-size:13px;font-weight:600;cursor:pointer}
+.chip.on{background:#3ee0c4;color:#06241f;border-color:#3ee0c4}
+.list{max-height:34vh;overflow:auto;margin:0;padding:0;list-style:none}
+.it{display:flex;align-items:center;gap:10px;padding:10px 8px;border-radius:12px;cursor:pointer}
+.it:active{background:#1b2340}
+.dot{width:26px;height:26px;border-radius:50%;background:#1b2340;border:2px solid #2a3560;display:grid;place-items:center;font-size:13px;flex:none}
+.it.ok .dot{background:#3ee0c4;border-color:#3ee0c4;color:#06241f}
+.it .nm{flex:1;font-size:14px;font-weight:600}
+.it .st{font-size:11px;opacity:.6}
+.bar{height:6px;border-radius:3px;background:#1b2340;overflow:hidden;margin:4px 0 8px}
+.bar i{display:block;height:100%;background:#3ee0c4;width:0;transition:width .4s}
+#toast{position:absolute;left:50%;top:70px;transform:translate(-50%,-20px);z-index:9;background:#3ee0c4;color:#06241f;font-weight:700;padding:10px 16px;border-radius:12px;opacity:0;transition:.3s;pointer-events:none;max-width:90vw;text-align:center}
+#toast.show{opacity:1;transform:translate(-50%,0)}
+#toast.err{background:#ff8a65}
+.mk{width:18px;height:18px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:#ffb454;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.5)}
+.mk.ok{background:#3ee0c4}
+.maplibregl-ctrl-attrib{font-size:10px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<canvas id="fx"></canvas>
+<div class="top">
+  <div class="badge">Дніпро 3D<small>крути, нахиляй, шукай пам’ятки</small></div>
+  <div class="badge score">Пам’ятки <b id="sc">0</b>/<span id="tot">10</span></div>
+</div>
+<div id="toast"></div>
+<div class="panel">
+  <div class="tabs">
+    <button class="tab on" data-t="city">Місто</button>
+    <button class="tab" data-t="lm">Пам’ятки</button>
+  </div>
+  <div class="sec on" id="city">
+    <div class="lbl">Час доби</div>
+    <div class="row">
+      <button class="pl" id="play" title="Доба за 90 секунд">▶</button>
+      <input type="range" id="hr" min="0" max="24" step="0.05" value="13">
+      <div class="time" id="tm">13:00</div>
+    </div>
+    <div class="lbl">Погода</div>
+    <div class="chips" id="wx">
+      <button class="chip on" data-w="clear">Ясно</button>
+      <button class="chip" data-w="cloud">Хмарно</button>
+      <button class="chip" data-w="rain">Дощ</button>
+      <button class="chip" data-w="snow">Сніг</button>
+    </div>
+  </div>
+  <div class="sec" id="lm">
+    <div class="bar"><i id="pb"></i></div>
+    <ul class="list" id="ls"></ul>
+  </div>
+</div>
+
+<div id="dbg" style="display:none;position:absolute;z-index:99;left:10px;right:10px;top:70px;background:#3b0d0d;color:#ffd2d2;border:1px solid #ff6b6b;border-radius:12px;padding:12px;font:12px/1.4 monospace;white-space:pre-wrap;max-height:50vh;overflow:auto"></div>
+<script>
+function showErr(m){var d=document.getElementById('dbg');d.style.display='block';d.textContent+=m+'\n';}
+window.addEventListener('error',function(e){showErr('ERR: '+(e.message||'?')+(e.filename?' @'+e.filename.split('/').pop()+':'+e.lineno:''));},true);
+window.addEventListener('unhandledrejection',function(e){showErr('PROMISE: '+(e.reason&&e.reason.message||e.reason));});
+</script>
+<script crossorigin="anonymous" src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+if(typeof maplibregl==='undefined'){showErr('MapLibre не завантажився (unpkg.com заблоковано або немає інтернету). Файл треба відкривати у звичайному браузері, не в прев’ю.');}
+else if(!maplibregl.supported()){showErr('WebGL недоступний у цьому браузері/прев’ю. Відкрий у Chrome/Safari.');}
+</script>
+<script>
+/* ---------- палитры ---------- */
+const DAY  ={bg:'#e9e5d9',park:'#bfdca5',wood:'#a8cf8e',water:'#86c1e6',road:'#ffffff',minor:'#f6f3ec',bld:'#ddd6ca',bldHi:'#c9c1b3'};
+const NIGHT={bg:'#0d1224',park:'#13271f',wood:'#0f221a',water:'#0a2848',road:'#2c3454',minor:'#232a46',bld:'#2b3558',bldHi:'#3a4670'};
+const SNOW ={bg:'#f1f5fa',park:'#e6eef6',wood:'#dfe9f2',water:'#7da4c4',road:'#dfe6ee',minor:'#e8edf3',bld:'#e6edf5',bldHi:'#d3dde9'};
+const GRAY ='#8d939e';
+
+const hex=h=>[1,3,5].map(i=>parseInt(h.slice(i,i+2),16));
+const mix=(a,b,t)=>{const A=Array.isArray(a)?a:hex(a),B=Array.isArray(b)?b:hex(b);return A.map((v,i)=>v+(B[i]-v)*t)};
+const css=c=>'rgb('+c.map(v=>Math.round(Math.max(0,Math.min(255,v)))).join(',')+')';
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+const state={hour:13,weather:'clear',playing:false};
+
+/* ---------- стиль карти (OpenFreeMap, дані OpenStreetMap) ---------- */
+const SRC='openmaptiles';
+const style={
+  version:8,
+  sources:{[SRC]:{type:'vector',url:'https://tiles.openfreemap.org/planet'}},
+  layers:[
+    {id:'bg',type:'background',paint:{'background-color':DAY.bg}},
+    {id:'wood',type:'fill',source:SRC,'source-layer':'landcover',filter:['==',['get','class'],'wood'],paint:{'fill-color':DAY.wood}},
+    {id:'grass',type:'fill',source:SRC,'source-layer':'landcover',filter:['in',['get','class'],['literal',['grass','farmland','wetland']]],paint:{'fill-color':DAY.park}},
+    {id:'park',type:'fill',source:SRC,'source-layer':'park',paint:{'fill-color':DAY.park,'fill-opacity':.9}},
+    {id:'water',type:'fill',source:SRC,'source-layer':'water',paint:{'fill-color':DAY.water}},
+    {id:'waterway',type:'line',source:SRC,'source-layer':'waterway',paint:{'line-color':DAY.water,'line-width':2}},
+    {id:'road-glow',type:'line',source:SRC,'source-layer':'transportation',minzoom:13,
+      filter:['all',['in',['get','class'],['literal',['motorway','trunk','primary','secondary','tertiary']]],['!=',['get','brunnel'],'tunnel']],
+      layout:{'line-cap':'round','line-join':'round'},
+      paint:{'line-color':'#ffb85c','line-width':['interpolate',['exponential',1.5],['zoom'],13,2,19,16],'line-blur':4,'line-opacity':0}},
+    {id:'road-minor',type:'line',source:SRC,'source-layer':'transportation',minzoom:13,
+      filter:['all',['in',['get','class'],['literal',['minor','service','track','path','pedestrian']]],['!=',['get','brunnel'],'tunnel']],
+      layout:{'line-cap':'round','line-join':'round'},
+      paint:{'line-color':DAY.minor,'line-width':['interpolate',['exponential',1.5],['zoom'],13,.5,19,7]}},
+    {id:'road-major',type:'line',source:SRC,'source-layer':'transportation',minzoom:9,
+      filter:['all',['in',['get','class'],['literal',['motorway','trunk','primary','secondary','tertiary']]],['!=',['get','brunnel'],'tunnel']],
+      layout:{'line-cap':'round','line-join':'round'},
+      paint:{'line-color':DAY.road,'line-width':['interpolate',['exponential',1.5],['zoom'],9,.8,13,2,19,13]}},
+    {id:'building',type:'fill-extrusion',source:SRC,'source-layer':'building',minzoom:13,
+      paint:{
+        'fill-extrusion-color':DAY.bld,
+        'fill-extrusion-height':['coalesce',['get','render_height'],6],
+        'fill-extrusion-base':['coalesce',['get','render_min_height'],0],
+        'fill-extrusion-opacity':.96,
+        'fill-extrusion-vertical-gradient':true}}
+  ],
+  light:{anchor:'map',color:'#fff3da',intensity:.45,position:[1.15,200,40]}
+};
+
+const map=new maplibregl.Map({
+  container:'map',style,
+  center:[35.0462,48.4647],zoom:15.6,pitch:62,bearing:-25,
+  maxPitch:78,minZoom:10,attributionControl:{compact:true}
+});
+map.on('error',e=>showErr('MAP: '+(e.error&&e.error.message||JSON.stringify(e))));
+map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'top-right');
+
+/* ---------- час / погода ---------- */
+function applyLook(){
+  if(!map.isStyleLoaded() && !map.getLayer('bg')) return;
+  const h=state.hour;
+  const sun=(h>=6&&h<=18)?Math.sin(Math.PI*(h-6)/12):0;
+  const k=clamp(sun*3,0,1);                 // 0 ніч .. 1 день
+  const warm=(k>0&&k<1)?Math.sin(Math.PI*k)*.3:0; // схід/захід
+  const w=state.weather;
+  const pal={};
+  for(const key of Object.keys(DAY)){
+    let c=mix(NIGHT[key],DAY[key],k);
+    if(warm>0) c=mix(c,[255,170,110],warm*.5);
+    if(w==='cloud') c=mix(c,hex(GRAY),.22*k+.08);
+    if(w==='rain')  c=mix(c,hex(GRAY),.4*k+.15);
+    if(w==='snow')  c=mix(c,mix(NIGHT[key],SNOW[key],.45+.55*k),.85);
+    pal[key]=css(c);
+  }
+  const s=(l,p,v)=>{if(map.getLayer(l))map.setPaintProperty(l,p,v)};
+  s('bg','background-color',pal.bg);
+  s('wood','fill-color',pal.wood);
+  s('grass','fill-color',pal.park);
+  s('park','fill-color',pal.park);
+  s('water','fill-color',pal.water);
+  s('waterway','line-color',pal.water);
+  s('road-major','line-color',pal.road);
+  s('road-minor','line-color',pal.minor);
+  s('road-glow','line-opacity',(1-k)*.85);
+  s('building','fill-extrusion-color',['interpolate',['linear'],['coalesce',['get','render_height'],6],0,pal.bld,70,pal.bldHi]);
+  const az=(h>=6&&h<=18)?90+180*((h-6)/12):200;
+  const polar=90-62*sun;
+  const lc=k>.5?(w==='clear'?'#fff3da':'#e6ebf5'):'#7b8cc8';
+  map.setLight({anchor:'map',color:lc,intensity:.18+.34*k*(w==='clear'?1:.7),position:[1.15,az,clamp(polar,25,85)]});
+}
+map.on('load',()=>{applyLook();seedFx();resolveAll();checkVisit();});
+
+const hr=document.getElementById('hr'),tm=document.getElementById('tm');
+function setHour(h,fromSlider){
+  state.hour=((h%24)+24)%24;
+  const hh=Math.floor(state.hour),mm=Math.floor((state.hour-hh)*60);
+  tm.textContent=String(hh).padStart(2,'0')+':'+String(mm).padStart(2,'0');
+  if(!fromSlider) hr.value=state.hour;
+  applyLook();
+}
+hr.addEventListener('input',()=>setHour(parseFloat(hr.value),true));
+document.getElementById('play').onclick=function(){
+  state.playing=!state.playing;this.textContent=state.playing?'❚❚':'▶';
+  if(state.playing){last=performance.now();requestAnimationFrame(tick);}
+};
+let last=0;
+function tick(t){
+  if(!state.playing)return;
+  const dt=(t-last)/1000;last=t;
+  setHour(state.hour+dt*24/90);
+  requestAnimationFrame(tick);
+}
+document.querySelectorAll('#wx .chip').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#wx .chip').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on');state.weather=b.dataset.w;seedFx();applyLook();
+});
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===b));
+  document.querySelectorAll('.sec').forEach(x=>x.classList.toggle('on',x.id===b.dataset.t));
+});
+
+/* ---------- погодні ефекти (canvas) ---------- */
+const cv=document.getElementById('fx'),cx=cv.getContext('2d');
+let W=0,H=0,parts=[],clouds=[];
+function rs(){W=cv.width=innerWidth;H=cv.height=innerHeight;seedFx();}
+addEventListener('resize',rs);
+function seedFx(){
+  W=cv.width=innerWidth;H=cv.height=innerHeight;
+  parts=[];clouds=[];
+  const w=state.weather;
+  if(w==='rain'){for(let i=0;i<280;i++)parts.push({x:Math.random()*W,y:Math.random()*H,v:16+Math.random()*14,l:10+Math.random()*12});}
+  if(w==='snow'){for(let i=0;i<190;i++)parts.push({x:Math.random()*W,y:Math.random()*H,v:.7+Math.random()*1.6,r:1+Math.random()*2.6,s:Math.random()*6});}
+  if(w==='cloud'||w==='rain'){for(let i=0;i<7;i++)clouds.push({x:Math.random()*W,y:Math.random()*H*.5,r:140+Math.random()*180,v:.12+Math.random()*.2});}
+}
+function fx(t){
+  cx.clearRect(0,0,W,H);
+  const w=state.weather;
+  const night=!(state.hour>=6&&state.hour<=18);
+  for(const c of clouds){
+    c.x+=c.v;if(c.x-c.r>W)c.x=-c.r;
+    const g=cx.createRadialGradient(c.x,c.y,0,c.x,c.y,c.r);
+    const col=night?'60,70,100':(w==='rain'?'110,118,135':'230,234,242');
+    g.addColorStop(0,'rgba('+col+','+(w==='rain'?.28:.2)+')');g.addColorStop(1,'rgba('+col+',0)');
+    cx.fillStyle=g;cx.fillRect(c.x-c.r,c.y-c.r,c.r*2,c.r*2);
+  }
+  if(w==='rain'){
+    cx.strokeStyle='rgba(190,208,235,.5)';cx.lineWidth=1.1;cx.beginPath();
+    for(const p of parts){cx.moveTo(p.x,p.y);cx.lineTo(p.x-3,p.y+p.l);p.y+=p.v;p.x-=1.3;if(p.y>H){p.y=-20;p.x=Math.random()*(W+60);}}
+    cx.stroke();
+  }else if(w==='snow'){
+    cx.fillStyle='rgba(255,255,255,.9)';
+    for(const p of parts){
+      p.y+=p.v;p.x+=Math.sin(t/900+p.s)*.6;
+      if(p.y>H){p.y=-6;p.x=Math.random()*W;}
+      cx.beginPath();cx.arc(p.x,p.y,p.r,0,6.283);cx.fill();
+    }
+  }
+  requestAnimationFrame(fx);
+}
+rs();requestAnimationFrame(fx);
+
+/* ---------- пам’ятки ---------- */
+const LM=[
+  {id:'menora', name:'Менора',                 q:'Менора Дніпро'},
+  {id:'circus', name:'Дніпровський цирк',      q:'Дніпровський цирк'},
+  {id:'opera',  name:'Театр опери та балету',  q:'Дніпровський національний академічний театр опери та балету'},
+  {id:'station',name:'Вокзал Дніпро-Головний', q:'Залізничний вокзал Дніпро-Головний'},
+  {id:'globe',  name:'Парк Глобе',             q:'Парк Глобе Дніпро'},
+  {id:'bridge', name:'Центральний міст',       q:'Центральний міст Дніпро'},
+  {id:'island', name:'Монастирський острів',   q:'Монастирський острів Дніпро'},
+  {id:'museum', name:'Музей Яворницького',     q:'Дніпровський національний історичний музей імені Яворницького'},
+  {id:'palace', name:'Потьомкінський палац',   q:'Потьомкінський палац Дніпро'},
+  {id:'shev',   name:'Парк Шевченка',          q:'Парк імені Тараса Шевченка Дніпро'}
+];
+let visited={},cache={};
+try{visited=JSON.parse(localStorage.getItem('dnipro3d_v')||'{}')}catch(e){}
+try{cache=JSON.parse(localStorage.getItem('dnipro3d_c')||'{}')}catch(e){}
+const save=()=>{try{localStorage.setItem('dnipro3d_v',JSON.stringify(visited));localStorage.setItem('dnipro3d_c',JSON.stringify(cache))}catch(e){}};
+
+const ls=document.getElementById('ls');
+document.getElementById('tot').textContent=LM.length;
+function render(){
+  ls.innerHTML='';
+  LM.forEach(l=>{
+    const li=document.createElement('li');
+    li.className='it'+(visited[l.id]?' ok':'');
+    li.innerHTML='<div class="dot">'+(visited[l.id]?'✓':'•')+'</div><div class="nm"></div><div class="st"></div>';
+    li.querySelector('.nm').textContent=l.name;
+    li.querySelector('.st').textContent=visited[l.id]?'відвідано':(l.pos?'знайти на мапі':'шукаю…');
+    li.onclick=()=>fly(l);
+    ls.appendChild(li);
+  });
+  const n=Object.keys(visited).length;
+  document.getElementById('sc').textContent=n;
+  document.getElementById('pb').style.width=(n/LM.length*100)+'%';
+}
+function toast(msg,err){
+  const t=document.getElementById('toast');t.textContent=msg;t.className='show'+(err?' err':'');
+  clearTimeout(toast.h);toast.h=setTimeout(()=>t.className='',2600);
+}
+function addMarker(l){
+  if(l.marker||!l.pos)return;
+  const el=document.createElement('div');el.className='mk'+(visited[l.id]?' ok':'');
+  el.title=l.name;el.onclick=e=>{e.stopPropagation();fly(l)};
+  l.marker=new maplibregl.Marker({element:el,anchor:'bottom-left',offset:[-1,-1]}).setLngLat(l.pos).addTo(map);
+  l.el=el;
+}
+async function geocode(l){
+  if(cache[l.id]){l.pos=cache[l.id];return;}
+  const url='https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&accept-language=uk&viewbox=34.85,48.60,35.25,48.33&bounded=1&q='+encodeURIComponent(l.q);
+  try{
+    const r=await fetch(url);const j=await r.json();
+    if(j&&j[0]){l.pos=[parseFloat(j[0].lon),parseFloat(j[0].lat)];cache[l.id]=l.pos;save();}
+  }catch(e){}
+}
+async function resolveAll(){
+  for(const l of LM){
+    await geocode(l);
+    if(l.pos)addMarker(l);
+    render();
+    if(!cache[l.id])await new Promise(r=>setTimeout(r,1100)); // ліміт Nominatim: 1 запит/с
+  }
+}
+function fly(l){
+  if(!l.pos){toast('Координати ще завантажуються…',true);return;}
+  map.flyTo({center:l.pos,zoom:17.2,pitch:62,bearing:map.getBearing(),speed:.9,essential:true});
+}
+function dist(a,b){
+  const R=6371000,r=Math.PI/180,dLat=(b[1]-a[1])*r,dLon=(b[0]-a[0])*r;
+  const x=Math.sin(dLat/2)**2+Math.cos(a[1]*r)*Math.cos(b[1]*r)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(x));
+}
+function checkVisit(){
+  if(map.getZoom()<16.2)return;
+  const c=map.getCenter().toArray();
+  for(const l of LM){
+    if(l.pos&&!visited[l.id]&&dist(c,l.pos)<140){
+      visited[l.id]=1;save();render();
+      if(l.el)l.el.classList.add('ok');
+      toast('Штамп отримано: '+l.name);
+    }
+  }
+}
+map.on('moveend',checkVisit);
+render();
+</script>
+</body>
+</html>
