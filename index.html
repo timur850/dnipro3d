@@ -35,6 +35,8 @@ input[type=range]{flex:1;accent-color:#ffa51f;height:28px}
 .it.ok .dot{background:#ffa51f;border-color:#ffa51f;color:#2a1700}
 .it .nm{flex:1;font-size:14px;font-weight:600}
 .it .st{font-size:11px;opacity:.6}
+.cgrid{display:flex;flex-wrap:wrap;gap:6px;max-height:34vh;overflow:auto;margin-top:8px}
+.cgrid .chip{flex:0 0 auto;padding:9px 13px}
 .bar{height:6px;border-radius:3px;background:#1b2340;overflow:hidden;margin:4px 0 8px}
 .bar i{display:block;height:100%;background:#ffa51f;width:0;transition:width .4s}
 #toast{position:absolute;left:50%;top:70px;transform:translate(-50%,-20px);z-index:9;background:#ffa51f;color:#2a1700;font-weight:700;padding:10px 16px;border-radius:12px;opacity:0;transition:.3s;pointer-events:none;max-width:90vw;text-align:center}
@@ -59,6 +61,7 @@ input[type=range]{flex:1;accent-color:#ffa51f;height:28px}
 <div class="panel">
   <div class="tabs">
     <button class="tab on" data-t="city">Місто</button>
+    <button class="tab" data-t="cities">Міста</button>
     <button class="tab" data-t="lm">Пам’ятки</button>
   </div>
   <div class="sec on" id="city">
@@ -76,7 +79,12 @@ input[type=range]{flex:1;accent-color:#ffa51f;height:28px}
       <button class="chip" data-w="snow">Сніг</button>
     </div>
   </div>
+  <div class="sec" id="cities">
+    <div class="lbl">Вся Україна — обери місто</div>
+    <div class="cgrid" id="cg"></div>
+  </div>
   <div class="sec" id="lm">
+    <div class="lbl" id="lmcity"></div>
     <div class="bar"><i id="pb"></i></div>
     <ul class="list" id="ls"></ul>
   </div>
@@ -112,6 +120,7 @@ const state={hour:13,weather:'clear',playing:false};
 const SRC='openmaptiles';
 const style={
   version:8,
+  glyphs:'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf',
   sources:{[SRC]:{type:'vector',url:'https://tiles.openfreemap.org/planet'}},
   layers:[
     {id:'bg',type:'background',paint:{'background-color':DAY.bg}},
@@ -155,7 +164,16 @@ const style={
           ['place_of_worship'],'#b08a4a',
           ['park','playground','zoo','stadium','pitch'],'#2fa35a',
           ['museum','theatre','cinema','attraction','monument'],'#d4a017',
-          '#7e8794']}}
+          '#7e8794']}},
+    {id:'place-city',type:'symbol',source:SRC,'source-layer':'place',minzoom:4,filter:['==',['get','class'],'city'],
+      layout:{'text-field':['coalesce',['get','name:uk'],['get','name']],'text-font':['Noto Sans Bold'],'text-size':['interpolate',['linear'],['zoom'],4,11,10,19],'text-max-width':8},
+      paint:{'text-color':'#1d2433','text-halo-color':'#ffffff','text-halo-width':1.8}},
+    {id:'place-town',type:'symbol',source:SRC,'source-layer':'place',minzoom:7.5,filter:['==',['get','class'],'town'],
+      layout:{'text-field':['coalesce',['get','name:uk'],['get','name']],'text-font':['Noto Sans Bold'],'text-size':['interpolate',['linear'],['zoom'],7.5,10,13,16],'text-max-width':8},
+      paint:{'text-color':'#1d2433','text-halo-color':'#ffffff','text-halo-width':1.6}},
+    {id:'place-village',type:'symbol',source:SRC,'source-layer':'place',minzoom:10.5,filter:['in',['get','class'],['literal',['village','suburb','neighbourhood','hamlet']]],
+      layout:{'text-field':['coalesce',['get','name:uk'],['get','name']],'text-font':['Noto Sans Regular'],'text-size':['interpolate',['linear'],['zoom'],10.5,10,16,14],'text-max-width':8},
+      paint:{'text-color':'#2b3447','text-halo-color':'#ffffff','text-halo-width':1.4}}
   ],
   light:{anchor:'map',color:'#fff3da',intensity:.45,position:[1.15,200,40]}
 };
@@ -163,9 +181,9 @@ const style={
 const map=new maplibregl.Map({
   container:'map',style,
   center:[35.0462,48.4647],zoom:15.6,pitch:62,bearing:-25,
-  maxPitch:78,minZoom:10,attributionControl:{compact:true}
+  maxPitch:78,minZoom:5,maxBounds:[[19.5,43.0],[42.5,53.8]],attributionControl:{compact:true}
 });
-map.on('error',e=>showErr('MAP: '+(e.error&&e.error.message||JSON.stringify(e))));
+map.on('error',e=>{const m=(e.error&&e.error.message)||'';if(/glyph|pbf|font/i.test(m))return;showErr('MAP: '+(m||JSON.stringify(e)));});
 map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'top-right');
 
 /* ---------- час / погода ---------- */
@@ -190,6 +208,10 @@ function applyLook(){
   s('wood','fill-color',pal.wood);
   s('grass','fill-color',pal.park);
   s('park','fill-color',pal.park);
+  for(const id of ['place-city','place-town','place-village']){
+    s(id,'text-color',css(mix([231,236,255],[29,36,51],k)));
+    s(id,'text-halo-color',css(mix([13,18,36],[255,255,255],k)));
+  }
   {
     const lu=c=>{let x=mix(NIGHT.bg,c,k);if(w==='snow')x=mix(x,[236,242,248],.6);else if(w!=='clear')x=mix(x,hex(GRAY),.12);return css(x);};
     s('landuse','fill-color',['match',['get','class'],
@@ -223,7 +245,7 @@ function applyLook(){
   map.setLight({anchor:'map',color:lc,intensity:.18+.34*k*(w==='clear'?1:.7),position:[1.15,az,clamp(polar,25,85)]});
   if(typeof setLive==='function')setLive(k,w,az,clamp(polar,25,85));
 }
-map.on('load',()=>{applyLook();seedFx();resolveAll();checkVisit();});
+map.on('load',()=>{applyLook();seedFx();resolveCity('dnipro');checkVisit();});
 
 const hr=document.getElementById('hr'),tm=document.getElementById('tm');
 function setHour(h,fromSlider){
@@ -295,18 +317,50 @@ function fx(t){
 rs();requestAnimationFrame(fx);
 
 /* ---------- пам’ятки ---------- */
-const LM=[
-  {id:'menora', name:'Менора',                 q:'Менора Дніпро'},
-  {id:'circus', name:'Дніпровський цирк',      q:'Дніпровський цирк'},
-  {id:'opera',  name:'Театр опери та балету',  q:'Дніпровський національний академічний театр опери та балету'},
-  {id:'station',name:'Вокзал Дніпро-Головний', q:'Залізничний вокзал Дніпро-Головний'},
-  {id:'globe',  name:'Парк Глобе',             q:'Парк Глобе Дніпро'},
-  {id:'bridge', name:'Центральний міст',       q:'Центральний міст Дніпро'},
-  {id:'island', name:'Монастирський острів',   q:'Монастирський острів Дніпро'},
-  {id:'museum', name:'Музей Яворницького',     q:'Дніпровський національний історичний музей імені Яворницького'},
-  {id:'palace', name:'Потьомкінський палац',   q:'Потьомкінський палац Дніпро'},
-  {id:'shev',   name:'Парк Шевченка',          q:'Парк імені Тараса Шевченка Дніпро'}
+const CITIES=[
+  {id:'kyiv',name:'Київ',c:[30.5234,50.4501]},{id:'kharkiv',name:'Харків',c:[36.2304,49.9935]},
+  {id:'odesa',name:'Одеса',c:[30.7233,46.4825]},{id:'dnipro',name:'Дніпро',c:[35.0462,48.4647]},
+  {id:'lviv',name:'Львів',c:[24.0297,49.8397]},{id:'zaporizhzhia',name:'Запоріжжя',c:[35.1396,47.8388]},
+  {id:'kryvyi',name:'Кривий Ріг',c:[33.3433,47.9105]},{id:'mykolaiv',name:'Миколаїв',c:[31.9946,46.9750]},
+  {id:'poltava',name:'Полтава',c:[34.5514,49.5883]},{id:'chernihiv',name:'Чернігів',c:[31.2893,51.4982]},
+  {id:'sumy',name:'Суми',c:[34.7981,50.9077]},{id:'vinnytsia',name:'Вінниця',c:[28.4682,49.2328]},
+  {id:'zhytomyr',name:'Житомир',c:[28.6587,50.2547]},{id:'cherkasy',name:'Черкаси',c:[32.0598,49.4444]},
+  {id:'ivano',name:'Івано-Франківськ',c:[24.7111,48.9226]},{id:'uzhhorod',name:'Ужгород',c:[22.2879,48.6208]},
+  {id:'chernivtsi',name:'Чернівці',c:[25.9358,48.2915]},{id:'lutsk',name:'Луцьк',c:[25.3254,50.7472]},
+  {id:'rivne',name:'Рівне',c:[26.2516,50.6199]},{id:'ternopil',name:'Тернопіль',c:[25.5948,49.5535]},
+  {id:'khmelnytskyi',name:'Хмельницький',c:[26.9871,49.4230]},{id:'kropyvnytskyi',name:'Кропивницький',c:[32.2623,48.5079]},
+  {id:'kherson',name:'Херсон',c:[32.6169,46.6354]}
 ];
+const LM=[
+  {city:'dnipro',id:'menora', name:'Менора',                 q:'Менора Дніпро'},
+  {city:'dnipro',id:'circus', name:'Дніпровський цирк',      q:'Дніпровський цирк'},
+  {city:'dnipro',id:'opera',  name:'Театр опери та балету',  q:'Дніпровський національний академічний театр опери та балету'},
+  {city:'dnipro',id:'station',name:'Вокзал Дніпро-Головний', q:'Залізничний вокзал Дніпро-Головний'},
+  {city:'dnipro',id:'globe',  name:'Парк Глобе',             q:'Парк Глобе Дніпро'},
+  {city:'dnipro',id:'bridge', name:'Центральний міст',       q:'Центральний міст Дніпро'},
+  {city:'dnipro',id:'island', name:'Монастирський острів',   q:'Монастирський острів Дніпро'},
+  {city:'dnipro',id:'museum', name:'Музей Яворницького',     q:'Дніпровський національний історичний музей імені Яворницького'},
+  {city:'dnipro',id:'palace', name:'Потьомкінський палац',   q:'Потьомкінський палац Дніпро'},
+  {city:'dnipro',id:'shev',   name:'Парк Шевченка',          q:'Парк імені Тараса Шевченка Дніпро'},
+  {city:'kyiv',id:'sophia',  name:'Софійський собор',        q:'Софійський собор Київ'},
+  {city:'kyiv',id:'lavra',   name:'Києво-Печерська лавра',   q:'Києво-Печерська лавра'},
+  {city:'kyiv',id:'maidan',  name:'Майдан Незалежності',     q:'Майдан Незалежності Київ'},
+  {city:'kyiv',id:'motherland',name:'Батьківщина-Мати',      q:'Батьківщина-Мати Київ'},
+  {city:'kyiv',id:'goldgate',name:'Золоті ворота',           q:'Золоті ворота Київ'},
+  {city:'lviv',id:'rynok',   name:'Площа Ринок',             q:'площа Ринок Львів'},
+  {city:'lviv',id:'lopera',  name:'Львівська опера',         q:'Львівський театр опери та балету'},
+  {city:'lviv',id:'castle',  name:'Високий замок',           q:'Високий замок Львів'},
+  {city:'odesa',id:'potemkin',name:'Потьомкінські сходи',    q:'Потьомкінські сходи Одеса'},
+  {city:'odesa',id:'oopera', name:'Одеський оперний театр',  q:'Одеський оперний театр'},
+  {city:'odesa',id:'primor', name:'Приморський бульвар',     q:'Приморський бульвар Одеса'},
+  {city:'kharkiv',id:'svoboda',name:'Площа Свободи',         q:'площа Свободи Харків'},
+  {city:'kharkiv',id:'derzhprom',name:'Держпром',            q:'Держпром Харків'},
+  {city:'kharkiv',id:'kopera',name:'Харківський оперний театр',q:'Харківський національний академічний театр опери та балету'},
+  {city:'zaporizhzhia',id:'dniprohes',name:'Дніпрогес',       q:'Дніпрогес Запоріжжя'},
+  {city:'zaporizhzhia',id:'khortytsia',name:'Острів Хортиця', q:'Хортиця Запоріжжя'}
+];
+let curCity='dnipro';
+const cityOf=id=>CITIES.find(c=>c.id===id);
 let visited={},cache={};
 try{visited=JSON.parse(localStorage.getItem('dnipro3d_v')||'{}')}catch(e){}
 try{cache=JSON.parse(localStorage.getItem('dnipro3d_c')||'{}')}catch(e){}
@@ -316,7 +370,9 @@ const ls=document.getElementById('ls');
 document.getElementById('tot').textContent=LM.length;
 function render(){
   ls.innerHTML='';
-  LM.forEach(l=>{
+  const cc=cityOf(curCity);
+  document.getElementById('lmcity').textContent=cc?('Пам’ятки: '+cc.name):'Пам’ятки';
+  LM.filter(l=>l.city===curCity).forEach(l=>{
     const li=document.createElement('li');
     li.className='it'+(visited[l.id]?' ok':'');
     li.innerHTML='<div class="dot">'+(visited[l.id]?'✓':'•')+'</div><div class="nm"></div><div class="st"></div>';
@@ -340,22 +396,36 @@ function addMarker(l){
   l.marker=new maplibregl.Marker({element:el,anchor:'bottom-left',offset:[-1,-1]}).setLngLat(l.pos).addTo(map);
   l.el=el;
 }
+function vbox(id){const c=cityOf(id).c;return (c[0]-.35)+','+(c[1]+.25)+','+(c[0]+.35)+','+(c[1]-.25);}
 async function geocode(l){
   if(cache[l.id]){l.pos=cache[l.id];return;}
-  const url='https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&accept-language=uk&viewbox=34.85,48.60,35.25,48.33&bounded=1&q='+encodeURIComponent(l.q);
+  const url='https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&accept-language=uk&viewbox='+vbox(l.city)+'&bounded=1&q='+encodeURIComponent(l.q);
   try{
     const r=await fetch(url);const j=await r.json();
     if(j&&j[0]){l.pos=[parseFloat(j[0].lon),parseFloat(j[0].lat)];cache[l.id]=l.pos;save();}
   }catch(e){}
 }
-async function resolveAll(){
-  for(const l of LM){
+const resolving={};
+async function resolveCity(id){
+  if(resolving[id])return;resolving[id]=true;
+  for(const l of LM.filter(x=>x.city===id)){
     await geocode(l);
     if(l.pos)addMarker(l);
     render();
     if(!cache[l.id])await new Promise(r=>setTimeout(r,1100)); // ліміт Nominatim: 1 запит/с
   }
 }
+function detectCity(){
+  const c=map.getCenter().toArray();let best=null,bd=40000;
+  for(const k of CITIES){const d=dist(c,k.c);if(d<bd){bd=d;best=k;}}
+  if(best&&best.id!==curCity){curCity=best.id;render();resolveCity(curCity);}
+}
+const cg=document.getElementById('cg');
+CITIES.forEach(k=>{
+  const b=document.createElement('button');b.className='chip';b.textContent=k.name;
+  b.onclick=()=>{map.flyTo({center:k.c,zoom:15.7,pitch:62,bearing:-25,speed:1.4,essential:true});};
+  cg.appendChild(b);
+});
 function fly(l){
   if(!l.pos){toast('Координати ще завантажуються…',true);return;}
   map.flyTo({center:l.pos,zoom:17.2,pitch:62,bearing:map.getBearing(),speed:.9,essential:true});
@@ -376,14 +446,14 @@ function checkVisit(){
     }
   }
 }
-map.on('moveend',checkVisit);
+map.on('moveend',()=>{checkVisit();detectCity();});
 render();
 
 /* ---------- живе місто: справжні 3D-моделі (three.js) ---------- */
-const ORIGIN=[35.0462,48.4647];
+let ORIGIN=[35.0462,48.4647];
 const M_LAT=111320;
 const mLon=lat=>M_LAT*Math.cos(lat*Math.PI/180);
-const KX0=mLon(ORIGIN[1]);
+let KX0=mLon(ORIGIN[1]);
 const toLocal=(lon,lat)=>[(lon-ORIGIN[0])*KX0,(lat-ORIGIN[1])*M_LAT];
 const hsh=(a,b)=>{const q=Math.sin(a*127.1+b*311.7)*43758.5453;return q-Math.floor(q)};
 const pkey=p=>p[0].toFixed(5)+','+p[1].toFixed(5);
@@ -948,7 +1018,14 @@ map.on('click','poi-dots',e=>{
 map.on('mouseenter','poi-dots',()=>map.getCanvas().style.cursor='pointer');
 map.on('mouseleave','poi-dots',()=>map.getCanvas().style.cursor='');
 let schedH=0;
-function sched(){clearTimeout(schedH);schedH=setTimeout(()=>{try{buildTrees();buildRoads();}catch(e){showErr('LIVE: '+e.message);}try{buildBuildings();}catch(e){showErr('BLD: '+e.message);}},350);}
+function maybeRebase(){
+  const c=map.getCenter();
+  if(dist([c.lng,c.lat],ORIGIN)<8000)return;
+  ORIGIN=[c.lng,c.lat];KX0=mLon(c.lat);
+  bldCache.clear();L.veh=[];L.trees=[];L.lamps=[];
+  if(L.ready){L.trunk.count=L.crown.count=L.cone.count=0;L.pole.count=L.lampHead.count=0;if(L.bGroup)L.bGroup.visible=false;}
+}
+function sched(){clearTimeout(schedH);schedH=setTimeout(()=>{try{maybeRebase();}catch(e){}try{buildTrees();buildRoads();}catch(e){showErr('LIVE: '+e.message);}try{buildBuildings();}catch(e){showErr('BLD: '+e.message);}},350);}
 map.on('moveend',sched);
 map.on('sourcedata',e=>{if(e.sourceId===SRC&&e.isSourceLoaded)sched();});
 
